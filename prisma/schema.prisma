@@ -1,0 +1,193 @@
+// Prisma schema for proactive-coach MVP.
+// Single-user personal project: only one User row is expected to exist in v1.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../app/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model User {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+
+  profile      UserProfile?
+  persona      PersonaProfile?
+  dailyPlans   DailyPlan[]
+  checkIns     CheckIn[]
+  messages     Message[]
+  episodicLogs EpisodicLog[]
+  preferences  PreferenceMemory[]
+  agentTraces  AgentTrace[]
+}
+
+// Tier 1 memory: explicit facts filled once at onboarding, changed only by the user.
+model UserProfile {
+  id              String   @id @default(cuid())
+  userId          String   @unique
+  user            User     @relation(fields: [userId], references: [id])
+  goalWeightKg    Float
+  currentWeightKg Float
+  dislikedFoods   String // JSON string array, explicit onboarding dislikes (separate from inferred PreferenceMemory)
+  morningTime     String // "HH:mm", local display only in v1 (cron schedule itself is static)
+  lunchTime       String
+  eveningTime     String
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+// Tier 1 memory: static persona dimensions, collected explicitly at onboarding.
+model PersonaProfile {
+  id             String    @id @default(cuid())
+  userId         String    @unique
+  user           User      @relation(fields: [userId], references: [id])
+  tonePreference String // "gentle" | "firm" | "analytical"
+  motivationHook String // "health" | "appearance" | "event" | "discipline"
+  eventLabel     String? // e.g. "婚礼", required only when motivationHook = "event"
+  eventDate      DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+}
+
+enum PlanType {
+  MORNING
+  LUNCH
+  EVENING
+}
+
+enum PlanStatus {
+  PENDING
+  CONFIRMED
+  SWAPPED
+  COMPLETED
+  SKIPPED
+  AUTO_ACCEPTED
+  EXPIRED
+}
+
+// One row per (user, date, type) -- the day's draft plan / checkpoint.
+model DailyPlan {
+  id        String     @id @default(cuid())
+  userId    String
+  user      User       @relation(fields: [userId], references: [id])
+  date      String // "yyyy-MM-dd", local calendar day
+  type      PlanType
+  mealKey   String? // key into the static recipe library
+  mealTitle String?
+  kcal      Int?
+  status    PlanStatus @default(PENDING)
+  expiresAt DateTime?
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+  messages  Message[]
+
+  @@unique([userId, date, type])
+}
+
+enum MessageRequire {
+  CONFIRM_OR_SWAP
+  CONFIRM_OR_SKIP
+  CHECKIN
+  ASK_USER
+  NONE
+}
+
+// The single proactive Feed: outbound messages + the user's short structured reply.
+model Message {
+  id             String         @id @default(cuid())
+  userId         String
+  user           User           @relation(fields: [userId], references: [id])
+  planId         String?
+  plan           DailyPlan?     @relation(fields: [planId], references: [id])
+  type           PlanType
+  text           String
+  require        MessageRequire
+  payload        String // JSON string: { tone, motivationHook, mealKey, kcal, ... }
+  expiresAt      DateTime?
+  respondedAt    DateTime?
+  responseAction String? // "confirm" | "swap" | "complete" | "skip"
+  createdAt      DateTime       @default(now())
+}
+
+// Tier 3 memory: append-only raw event log. Never mutated; used to derive
+// PreferenceMemory and to compute engagement trend.
+enum EpisodicEventType {
+  PLAN_GENERATED
+  ACTION_CONFIRM
+  ACTION_SWAP
+  ACTION_COMPLETE
+  ACTION_SKIP
+  CHECKIN
+  AUTO_ACCEPTED
+  ASK_USER_RESPONDED
+}
+
+model EpisodicLog {
+  id        String            @id @default(cuid())
+  userId    String
+  user      User              @relation(fields: [userId], references: [id])
+  eventType EpisodicEventType
+  planType  PlanType?
+  mealKey   String?
+  metadata  String? // JSON string, freeform extra context
+  createdAt DateTime          @default(now())
+}
+
+model CheckIn {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id])
+  date       String // "yyyy-MM-dd"
+  weightKg   Float?
+  difficulty Int? // 1-5 subjective difficulty, optional
+  createdAt  DateTime @default(now())
+}
+
+// Tier 2 memory: distilled, confidence-weighted preferences. MVP writes are
+// rule-driven from button actions only (no LLM extraction yet).
+model PreferenceMemory {
+  id              String   @id @default(cuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id])
+  key             String // e.g. "dislike:chicken_breast"
+  category        String // "food" | "exercise"
+  confidence      Float    @default(0.5)
+  source          String // "button_action" | "free_text_llm" | "onboarding"
+  evidenceCount   Int      @default(1)
+  lastConfirmedAt DateTime @default(now())
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([userId, key])
+}
+
+enum AgentTraceSource {
+  REAL // 真实 DeepSeek 调用
+  MOCK // 无 key/AGENT_MODE=mock，确定性假工具循环，仅供离线开发
+  DETERMINISTIC // 未经过模型，纯代码状态转移（confirm/complete/skip），只是为了 Trace 时间线不出现空洞
+}
+
+enum AgentTraceStatus {
+  COMPLETE
+  INCOMPLETE // 命中 stopWhen 步数上限或模型未收敛，已发降级兜底消息
+  FAILED // 模型/网络调用失败，未产出最终消息
+}
+
+// Observability layer: one row per Agent turn (cron trigger 或按钮 action)。
+// steps 是本轮 model 文本 / tool 调用 / tool 结果的顺序记录，供 /trace 展开查看。
+model AgentTrace {
+  id             String            @id @default(cuid())
+  userId         String
+  user           User              @relation(fields: [userId], references: [id])
+  trigger        String // "morning" | "lunch" | "evening" | "swap" | "confirm" | "complete" | "skip"
+  goal           String // 本轮任务描述，喂给模型的 goal prompt 摘要
+  source         AgentTraceSource
+  status         AgentTraceStatus  @default(COMPLETE)
+  steps          String // JSON array of TraceStep
+  finalMessageId String?
+  planId         String?
+  createdAt      DateTime          @default(now())
+}

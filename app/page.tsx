@@ -1,0 +1,127 @@
+import Link from "next/link";
+import { redirect } from "next/navigation";
+import { prisma } from "@/lib/db";
+import { getCurrentUser } from "@/lib/user";
+import { todayKey } from "@/lib/date";
+import { MessageCard } from "@/app/components/MessageCard";
+import { DevTriggerPanel } from "@/app/components/DevTriggerPanel";
+
+// Must be evaluated per-request, not baked in at build time -- this page
+// reflects live DB state (today's messages, plan status) that changes
+// throughout the day as cron triggers and button actions fire.
+export const dynamic = "force-dynamic";
+
+export default async function TodayPage() {
+  const user = await getCurrentUser();
+  if (!user || !user.profile || !user.persona) {
+    redirect("/onboarding");
+  }
+
+  const dateKey = todayKey();
+
+  const morningPlan = await prisma.dailyPlan.findUnique({
+    where: { userId_date_type: { userId: user.id, date: dateKey, type: "MORNING" } },
+  });
+  const eveningPlan = await prisma.dailyPlan.findUnique({
+    where: { userId_date_type: { userId: user.id, date: dateKey, type: "EVENING" } },
+  });
+
+  const [morningMessage, lunchMessage, eveningMessage] = await Promise.all([
+    morningPlan
+      ? prisma.message.findFirst({ where: { planId: morningPlan.id, type: "MORNING" } })
+      : null,
+    morningPlan
+      ? prisma.message.findFirst({ where: { planId: morningPlan.id, type: "LUNCH" } })
+      : null,
+    eveningPlan
+      ? prisma.message.findFirst({ where: { planId: eveningPlan.id, type: "EVENING" } })
+      : null,
+  ]);
+
+  const todaysCheckin = await prisma.checkIn.findFirst({ where: { userId: user.id, date: dateKey } });
+
+  const recentCheckins = await prisma.checkIn.findMany({
+    where: { userId: user.id },
+    orderBy: { date: "desc" },
+    take: 7,
+  });
+
+  const recentDays = await prisma.dailyPlan.findMany({
+    where: { userId: user.id, type: "MORNING" },
+    orderBy: { date: "desc" },
+    take: 7,
+  });
+
+  const latestWeight = todaysCheckin?.weightKg ?? recentCheckins[0]?.weightKg ?? user.profile.currentWeightKg;
+
+  return (
+    <main className="mx-auto max-w-md px-6 py-10">
+      <header className="mb-6 flex items-start justify-between">
+        <div>
+          <p className="text-xs uppercase tracking-wide text-neutral-400">{dateKey}</p>
+          <h1 className="mt-1 text-lg font-semibold text-neutral-900">今天</h1>
+          <p className="mt-1 text-sm text-neutral-500">
+            目标 {user.profile.goalWeightKg}kg · 当前 {latestWeight}kg
+          </p>
+        </div>
+        <Link href="/trace" className="text-sm text-neutral-500 underline-offset-2 hover:text-neutral-900 hover:underline">
+          Trace →
+        </Link>
+      </header>
+
+      <div className="flex flex-col gap-3">
+        {morningMessage && (
+          <MessageCard message={morningMessage} plan={morningPlan ? { status: morningPlan.status } : null} />
+        )}
+        {lunchMessage && (
+          <MessageCard message={lunchMessage} plan={morningPlan ? { status: morningPlan.status } : null} />
+        )}
+        {eveningMessage && (
+          <MessageCard
+            message={eveningMessage}
+            plan={eveningPlan ? { status: eveningPlan.status } : null}
+            todaysWeightKg={todaysCheckin?.weightKg ?? null}
+          />
+        )}
+
+        {!morningMessage && !lunchMessage && !eveningMessage && (
+          <div className="rounded-xl border border-dashed border-neutral-300 p-6 text-center text-sm text-neutral-400">
+            还没有新消息。它会在设定时间主动来找你。
+          </div>
+        )}
+      </div>
+
+      {recentCheckins.length > 0 && (
+        <section className="mt-8">
+          <h2 className="text-xs font-medium uppercase tracking-wide text-neutral-400">最近体重</h2>
+          <ul className="mt-2 flex flex-col gap-1">
+            {recentCheckins.map((c) => (
+              <li key={c.id} className="flex justify-between text-sm text-neutral-600">
+                <span>{c.date}</span>
+                <span>{c.weightKg}kg</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {recentDays.length > 0 && (
+        <section className="mt-8">
+          <h2 className="text-xs font-medium uppercase tracking-wide text-neutral-400">最近计划</h2>
+          <ul className="mt-2 flex flex-col gap-1">
+            {recentDays.map((p) => (
+              <li key={p.id} className="flex justify-between text-sm text-neutral-600">
+                <span>
+                  {p.date} · {p.mealTitle ?? "—"}
+                </span>
+                <span className="text-neutral-400">{p.status}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      <DevTriggerPanel />
+    </main>
+  );
+}
