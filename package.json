@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "prisma generate && next build",
+    "build": "prisma generate && prisma migrate deploy && next build",
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
@@ -15,10 +15,9 @@
   },
   "dependencies": {
     "@ai-sdk/deepseek": "^3.0.28",
-    "@prisma/adapter-better-sqlite3": "^7.9.1",
+    "@prisma/adapter-pg": "^7.9.1",
     "@prisma/client": "^7.9.1",
     "ai": "^7.0.64",
-    "better-sqlite3": "^13.0.3",
     "date-fns": "^4.4.0",
     "next": "16.3.0",
     "prisma": "^7.9.1",
