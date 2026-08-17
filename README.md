@@ -30,6 +30,12 @@
 - Tier 2（`PreferenceMemory`）：从按钮行为/Agent 信号推断出的偏好，带置信度和衰减（[lib/memory/preference.ts](lib/memory/preference.ts)）。
 - Tier 3（`EpisodicLog`）：只增不改的原始事件日志，用于计算参与度趋势、还原偏好。
 
+记忆不只是「写进去」，还有一个闭环（[lib/memory/preference.ts](lib/memory/preference.ts)、[lib/memory/metrics.ts](lib/memory/metrics.ts)）：
+
+- **归因**：换菜可能是不喜欢、也可能只是今天没供应。`dislike` 置信度逼近过滤阈值时，Agent 会 `ask_user` 问一句原因——答「不喜欢」则确认为 `user_confirmed`（不再衰减），答「没供应/换口味」则回退这次的置信度增量，避免把环境噪音学成口味偏好。
+- **冲突消解**：`dislike:X` 被强化时 `prefer:X` 同步衰减（反之亦然），对立信号不会同时高置信共存。
+- **效果度量**：`/trace` 顶部有一个指标面板——周换菜率走势、重复踩雷率、推断精确率——全部从 Tier 3 事件日志算出，用数据回答「记忆到底是帮了决策还是噪音」。
+
 **Trace（可观测层）**：每一轮 Agent 都会落一条 `AgentTrace`（[lib/agent/trace.ts](lib/agent/trace.ts)），记录模型的推理文本、每一次工具调用与返回，`/trace` 页面按时间列出、可展开查看。`source` 字段区分 `REAL`（真实 DeepSeek 调用）/ `MOCK`（无 key 时的确定性工具循环，仅供离线开发）/ `DETERMINISTIC`（无模型参与的按钮动作），避免把 mock 脚本冒充成真实 Agent 推理。
 
 **护栏**（[lib/orchestrator/daily-orchestrator.ts](lib/orchestrator/daily-orchestrator.ts)、[lib/agent/runner.ts](lib/agent/runner.ts)）：
@@ -41,9 +47,11 @@
 
 ## 本地开发
 
+数据库是 Postgres（生产和本地共用一个 Neon 实例，或自建一个）。先把 `.env.example` 复制为 `.env`，填入 `DATABASE_URL`（pooler 连接串，运行时用）和 `DIRECT_DATABASE_URL`（直连串，迁移用；Neon 上就是去掉 `-pooler` 的同一地址）。
+
 ```bash
 npm install
-npm run db:migrate   # 首次运行，创建本地 SQLite (dev.db)
+npm run db:migrate   # 首次运行，在数据库里建表
 npm run dev
 ```
 
@@ -72,10 +80,10 @@ DEEPSEEK_MODEL=deepseek-v4-pro   # 或 deepseek-v4-flash；旧别名 deepseek-ch
 
 ## 部署（Vercel）
 
-1. 推送到 GitHub，在 Vercel 导入这个仓库。
-2. 配置生产数据库：推荐用 Neon 或 Vercel Postgres 免费层，把 `DATABASE_URL` 设置到 Vercel 项目的环境变量里。上线前需要三步切换：把 `prisma/schema.prisma` 的 `datasource` provider 从 `sqlite` 改成 `postgresql`；把 driver adapter 从 `@prisma/adapter-better-sqlite3` 换成 `@prisma/adapter-pg`；**删掉 `prisma/migrations/` 后重新 `npx prisma migrate dev` 生成 Postgres 迁移**（现有迁移文件是 SQLite 方言，`migration_lock.toml` 锁定了 provider，不能直接复用）。
-3. 在 Vercel 项目环境变量里设置 `CRON_SECRET`（任意随机字符串）和 `DEEPSEEK_API_KEY`。设置 `CRON_SECRET` 后 Vercel Cron 会自动带上 `Authorization: Bearer $CRON_SECRET`，`/api/cron/[type]` 会校验这个值，避免接口被外部随意调用。
-4. `vercel.json` 已经配置了三个 Cron（07:30 / 12:00 / 20:30 北京时间，换算成 UTC）。如果你在 onboarding 里改了提醒时间，需要同步手动改 `vercel.json` 里的 cron 表达式——这是已知限制，Vercel Cron 的调度是部署时静态配置的，不会读数据库里的个性化时间。
+1. 推送到 GitHub，在 Vercel 导入这个仓库（代码已经是 Postgres 方言，不需要额外改造）。
+2. 建一个 Neon（或 Vercel Postgres）免费库，在 Vercel 项目环境变量里设置 `DATABASE_URL`（pooler 连接串）和 `DIRECT_DATABASE_URL`（直连串）。构建命令里的 `prisma migrate deploy` 会在每次部署时自动把未应用的迁移建进库里。
+3. 再设置 `CRON_SECRET`（任意随机字符串）、`DEEPSEEK_API_KEY`、`DEEPSEEK_MODEL`。设置 `CRON_SECRET` 后 Vercel Cron 会自动带上 `Authorization: Bearer $CRON_SECRET`，`/api/cron/[type]` 会校验这个值，避免接口被外部随意调用（同时首页的开发者面板在线上会因缺少密钥而失效，属于预期行为）。
+4. `vercel.json` 已经配置了三个 Cron（07:30 / 12:00 / 20:30 北京时间，换算成 UTC；Hobby 计划有 ±59 分钟的触发弹性），以及 `"regions": ["sin1"]` 把函数固定在新加坡、和 Neon 同区域——不配的话函数默认在美东，每次数据库查询多 200ms+ 跨洋往返。如果你在 onboarding 里改了提醒时间，需要同步手动改 cron 表达式——Vercel Cron 是部署时静态配置的，不会读数据库里的个性化时间。
 
 ## 目录结构
 
