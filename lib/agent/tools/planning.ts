@@ -3,22 +3,24 @@ import { tool } from "ai";
 import { prisma } from "@/lib/db";
 import { getCandidateMeals } from "@/lib/scenarios/weightloss/planner";
 import { getRecipeByKey } from "@/lib/scenarios/weightloss/recipes";
+import { endOfToday } from "@/lib/date";
+import { logEvent } from "@/lib/memory/episodic";
 import type { ToolCtx } from "./context";
 
-function endOfToday(): Date {
-  const d = new Date();
-  d.setHours(23, 59, 59, 999);
-  return d;
-}
-
-function assertValidMealKey(ctx: ToolCtx, mealKey: string) {
-  if (ctx.lastCandidateKeys.size > 0 && !ctx.lastCandidateKeys.has(mealKey)) {
+export function assertValidMealKey(ctx: Pick<ToolCtx, "lastCandidateKeys">, mealKey: string) {
+  // No "known recipe" escape hatch: a key can be real but belong to the wrong
+  // eating-mode library (observed in testing -- list_candidate_meals errored,
+  // the model wrote a cook-library key from memory for a canteen user).
+  // Fetching candidates first is mandatory, full stop.
+  if (ctx.lastCandidateKeys.size === 0) {
     throw new Error(
-      `invalid_meal_key: "${mealKey}" 不在最近一次 list_candidate_meals 返回的候选里，请先调用 list_candidate_meals 再选择。`
+      `invalid_meal_key: 本轮还没有调用过 list_candidate_meals，不能直接写入 mealKey="${mealKey}"。请先调用 list_candidate_meals。`
     );
   }
-  if (ctx.lastCandidateKeys.size === 0 && !getRecipeByKey(mealKey)) {
-    throw new Error(`invalid_meal_key: "${mealKey}" 不是已知菜品 key，请先调用 list_candidate_meals。`);
+  if (!ctx.lastCandidateKeys.has(mealKey)) {
+    throw new Error(
+      `invalid_meal_key: "${mealKey}" 不在最近一次 list_candidate_meals 返回的候选里，请从候选中选择。`
+    );
   }
 }
 
@@ -43,6 +45,10 @@ export const planningImpls = {
       assertValidMealKey(ctx, args.mealKey);
       meal = getRecipeByKey(args.mealKey);
     }
+    const existed = await prisma.dailyPlan.findUnique({
+      where: { userId_date_type: { userId: ctx.userId, date: ctx.dateKey, type: args.type } },
+      select: { id: true },
+    });
     const plan = await prisma.dailyPlan.upsert({
       where: { userId_date_type: { userId: ctx.userId, date: ctx.dateKey, type: args.type } },
       create: {
@@ -62,6 +68,12 @@ export const planningImpls = {
       },
     });
     ctx.finalPlanId = plan.id;
+    // Tier3 completeness: PLAN_GENERATED is logged by code, not left to the
+    // model's discretion. Only on first creation -- upsert re-runs (idempotent
+    // retriggers) must not spam the episodic log.
+    if (!existed) {
+      await logEvent({ userId: ctx.userId, eventType: "PLAN_GENERATED", planType: args.type, mealKey: plan.mealKey ?? undefined });
+    }
     return { planId: plan.id, mealKey: plan.mealKey, mealTitle: plan.mealTitle, kcal: plan.kcal, status: plan.status };
   },
 

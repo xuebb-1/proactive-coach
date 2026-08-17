@@ -13,8 +13,14 @@ export type ToolCtx = {
   /** Set once a message/plan is produced, so the runner knows the turn's outcome. */
   finalMessageId?: string;
   finalPlanId?: string;
+  /**
+   * Set by record_preference_signal. Lets the swap action verify the model
+   * actually recorded the dislike signal and backfill it in code if not --
+   * memory writes are too important to depend on prompt obedience.
+   */
+  recordedPreferenceSignal: boolean;
 };
 
 export function createToolCtx(userId: string, dateKey: string): ToolCtx {
-  return { userId, dateKey, lastCandidateKeys: new Set() };
+  return { userId, dateKey, lastCandidateKeys: new Set(), recordedPreferenceSignal: false };
 }

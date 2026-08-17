@@ -14,7 +14,7 @@
 | `search_preferences` | 按 category/confidence 查 Tier2 |
 | `get_recent_episodes` | 读近 N 天 Tier3 事件 |
 | `get_engagement_trend` | 参与度趋势（近 7 天 vs 前 7 天完成率） |
-| `list_candidate_meals` | 候选菜（已按偏好/重复过滤），模型只能从这里选，不能编菜名 |
+| `list_candidate_meals` | 候选（已按偏好/重复过滤），模型只能从这里选，不能编菜名。候选库随用户的吃饭方式切换：自己做饭是菜谱，吃食堂是打菜策略，点外卖是下单策略——推荐必须是用户真能执行的动作 |
 | `create_daily_plan` / `update_daily_plan` | 写入/更新当日计划（`upsert` 语义，mealKey 会被代码白名单校验） |
 | `send_proactive_message` / `ask_user` | 把最终文案或澄清问题写入 Feed，二选一，是本轮通常的最后一步 |
 | `record_preference_signal` | 记录一次离散的「喜欢/不喜欢」信号——置信度的增量由代码算，模型不能直接给数值 |
@@ -73,7 +73,7 @@ DEEPSEEK_MODEL=deepseek-v4-pro   # 或 deepseek-v4-flash；旧别名 deepseek-ch
 ## 部署（Vercel）
 
 1. 推送到 GitHub，在 Vercel 导入这个仓库。
-2. 配置生产数据库：推荐用 Neon 或 Vercel Postgres 免费层，把 `DATABASE_URL` 设置到 Vercel 项目的环境变量里（Prisma schema 已经是 SQLite provider，**上线前需要把 `prisma/schema.prisma` 的 `datasource` provider 从 `sqlite` 改成 `postgresql`，并把 driver adapter 从 `@prisma/adapter-better-sqlite3` 换成 `@prisma/adapter-pg`**，这是唯一需要手动切换的地方）。
+2. 配置生产数据库：推荐用 Neon 或 Vercel Postgres 免费层，把 `DATABASE_URL` 设置到 Vercel 项目的环境变量里。上线前需要三步切换：把 `prisma/schema.prisma` 的 `datasource` provider 从 `sqlite` 改成 `postgresql`；把 driver adapter 从 `@prisma/adapter-better-sqlite3` 换成 `@prisma/adapter-pg`；**删掉 `prisma/migrations/` 后重新 `npx prisma migrate dev` 生成 Postgres 迁移**（现有迁移文件是 SQLite 方言，`migration_lock.toml` 锁定了 provider，不能直接复用）。
 3. 在 Vercel 项目环境变量里设置 `CRON_SECRET`（任意随机字符串）和 `DEEPSEEK_API_KEY`。设置 `CRON_SECRET` 后 Vercel Cron 会自动带上 `Authorization: Bearer $CRON_SECRET`，`/api/cron/[type]` 会校验这个值，避免接口被外部随意调用。
 4. `vercel.json` 已经配置了三个 Cron（07:30 / 12:00 / 20:30 北京时间，换算成 UTC）。如果你在 onboarding 里改了提醒时间，需要同步手动改 `vercel.json` 里的 cron 表达式——这是已知限制，Vercel Cron 的调度是部署时静态配置的，不会读数据库里的个性化时间。
 
@@ -99,7 +99,7 @@ lib/
   date.ts                日期 key 工具
   memory/                Tier 2 / Tier 3 记忆读写
   orchestrator/          Cron 触发入口、参与度计算、按钮状态机（confirm/complete/skip 走这里，不经 Agent）
-  scenarios/weightloss/  减肥场景的菜谱库与候选过滤（Agent 的工具数据源，唯一场景，未做插件抽象）
+  scenarios/weightloss/  减肥场景的候选库（按吃饭方式分自炊/食堂/外卖三套）与过滤逻辑（Agent 的工具数据源，唯一场景，未做插件抽象）
 prisma/
   schema.prisma          数据模型（含 AgentTrace）
 ```

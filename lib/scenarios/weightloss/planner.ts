@@ -1,8 +1,17 @@
 import { prisma } from "@/lib/db";
 import { getActiveDislikedMealKeys } from "@/lib/memory/preference";
-import { RECIPES, type Recipe } from "./recipes";
+import { getMealLibrary, type Recipe } from "./recipes";
 
 const RECENT_REPEAT_WINDOW_DAYS = 3;
+
+/** The candidate pool depends on how the user actually eats (cook/canteen/takeout). */
+async function getLibraryForUser(userId: string): Promise<Recipe[]> {
+  const profile = await prisma.userProfile.findUnique({
+    where: { userId },
+    select: { eatingMode: true },
+  });
+  return getMealLibrary(profile?.eatingMode ?? "canteen");
+}
 
 function hashToIndex(seed: string, mod: number): number {
   let hash = 0;
@@ -47,20 +56,21 @@ export async function getCandidateMeals(
   explicitDislikedFoods: string[],
   extraExcludeKeys: string[] = []
 ): Promise<Recipe[]> {
+  const library = await getLibraryForUser(userId);
   const excluded = await getExcludedMealKeys(userId);
   for (const k of extraExcludeKeys) excluded.add(k);
 
-  let candidates = RECIPES.filter(
+  let candidates = library.filter(
     (r) => !excluded.has(r.key) && !matchesExplicitDislike(r, explicitDislikedFoods)
   );
   if (candidates.length === 0) {
-    candidates = RECIPES.filter((r) => !matchesExplicitDislike(r, explicitDislikedFoods));
+    candidates = library.filter((r) => !matchesExplicitDislike(r, explicitDislikedFoods));
   }
   if (candidates.length === 0) {
-    candidates = RECIPES.filter((r) => !extraExcludeKeys.includes(r.key));
+    candidates = library.filter((r) => !extraExcludeKeys.includes(r.key));
   }
   if (candidates.length === 0) {
-    candidates = RECIPES;
+    candidates = library;
   }
   return candidates;
 }
@@ -74,19 +84,20 @@ export async function pickMealForDate(
   dateKey: string,
   explicitDislikedFoods: string[]
 ): Promise<Recipe> {
+  const library = await getLibraryForUser(userId);
   const excluded = await getExcludedMealKeys(userId);
 
-  let candidates = RECIPES.filter(
+  let candidates = library.filter(
     (r) => !excluded.has(r.key) && !matchesExplicitDislike(r, explicitDislikedFoods)
   );
 
   // Filters can legitimately exhaust the list (small library, many exclusions).
   // Fall back progressively rather than erroring out.
   if (candidates.length === 0) {
-    candidates = RECIPES.filter((r) => !matchesExplicitDislike(r, explicitDislikedFoods));
+    candidates = library.filter((r) => !matchesExplicitDislike(r, explicitDislikedFoods));
   }
   if (candidates.length === 0) {
-    candidates = RECIPES;
+    candidates = library;
   }
 
   const idx = hashToIndex(`${userId}:${dateKey}`, candidates.length);
@@ -100,14 +111,15 @@ export async function pickSwapMeal(
   currentMealKey: string,
   explicitDislikedFoods: string[]
 ): Promise<Recipe> {
+  const library = await getLibraryForUser(userId);
   const excluded = await getExcludedMealKeys(userId);
   excluded.add(currentMealKey);
 
-  let candidates = RECIPES.filter(
+  let candidates = library.filter(
     (r) => !excluded.has(r.key) && !matchesExplicitDislike(r, explicitDislikedFoods)
   );
   if (candidates.length === 0) {
-    candidates = RECIPES.filter((r) => r.key !== currentMealKey);
+    candidates = library.filter((r) => r.key !== currentMealKey);
   }
 
   const idx = hashToIndex(`${userId}:${dateKey}:swap:${Date.now()}`, candidates.length);

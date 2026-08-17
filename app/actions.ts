@@ -43,6 +43,8 @@ export async function createOnboardingAction(formData: FormData) {
   const goalWeightKg = Number(formData.get("goalWeightKg"));
   const currentWeightKg = Number(formData.get("currentWeightKg"));
   const dislikedFoodsRaw = String(formData.get("dislikedFoods") || "");
+  const eatingModeRaw = String(formData.get("eatingMode") || "canteen");
+  const eatingMode = ["cook", "canteen", "takeout"].includes(eatingModeRaw) ? eatingModeRaw : "canteen";
   const morningTime = String(formData.get("morningTime") || "07:30");
   const lunchTime = String(formData.get("lunchTime") || "12:00");
   const eveningTime = String(formData.get("eveningTime") || "20:30");
@@ -63,6 +65,7 @@ export async function createOnboardingAction(formData: FormData) {
           goalWeightKg,
           currentWeightKg,
           dislikedFoods: JSON.stringify(dislikedFoods),
+          eatingMode,
           morningTime,
           lunchTime,
           eveningTime,

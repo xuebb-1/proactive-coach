@@ -40,6 +40,18 @@ export default async function OnboardingPage() {
               className="rounded-lg border border-neutral-300 px-3 py-2"
             />
           </label>
+          <div className="flex flex-col gap-2 text-sm">
+            <span>平时怎么解决吃饭</span>
+            <label className="flex items-center gap-2">
+              <input type="radio" name="eatingMode" value="canteen" defaultChecked /> 公司食堂为主（偶尔外卖）
+            </label>
+            <label className="flex items-center gap-2">
+              <input type="radio" name="eatingMode" value="takeout" /> 外卖为主
+            </label>
+            <label className="flex items-center gap-2">
+              <input type="radio" name="eatingMode" value="cook" /> 自己做饭
+            </label>
+          </div>
           <label className="flex flex-col gap-1 text-sm">
             忌口 / 不吃的东西（逗号分隔，可留空）
             <input

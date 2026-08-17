@@ -26,6 +26,14 @@ export type AgentTurnResult = {
   finalMessageId?: string;
   planId?: string;
   traceId: string;
+  /** Whether record_preference_signal was actually called this turn (swap turns). */
+  preferenceSignalRecorded?: boolean;
+};
+
+const FALLBACK_REQUIRE: Record<AgentTrigger, "CONFIRM_OR_SWAP" | "CONFIRM_OR_SKIP" | "CHECKIN"> = {
+  morning: "CONFIRM_OR_SWAP",
+  lunch: "CONFIRM_OR_SKIP",
+  evening: "CHECKIN",
 };
 
 /**
@@ -70,7 +78,7 @@ export async function runAgentTurn(params: {
         planId: ctx.finalPlanId,
         type: TRIGGER_TO_MESSAGE_TYPE[params.trigger],
         text: "抱歉，今天这一步我想得有点久，先给你一个简单的安排，稍后可以再手动调整。",
-        require: params.trigger === "evening" ? "CHECKIN" : "CONFIRM_OR_SWAP",
+        require: FALLBACK_REQUIRE[params.trigger],
       });
       steps.push({ type: "tool_call", toolName: "send_proactive_message", input: { fallback: true } });
       steps.push({ type: "tool_result", toolName: "send_proactive_message", output: fallback });
@@ -157,7 +165,13 @@ export async function runActionTurn(params: {
       planId: ctx.finalPlanId,
     });
 
-    return { status, finalMessageId: ctx.finalMessageId, planId: ctx.finalPlanId, traceId: trace.id };
+    return {
+      status,
+      finalMessageId: ctx.finalMessageId,
+      planId: ctx.finalPlanId,
+      traceId: trace.id,
+      preferenceSignalRecorded: ctx.recordedPreferenceSignal,
+    };
   } catch (err) {
     steps.push({ type: "error", message: err instanceof Error ? err.message : String(err) });
     const trace = await saveTrace({
@@ -170,14 +184,24 @@ export async function runActionTurn(params: {
       finalMessageId: ctx.finalMessageId,
       planId: ctx.finalPlanId,
     });
-    return { status: "failed", finalMessageId: ctx.finalMessageId, planId: ctx.finalPlanId, traceId: trace.id };
+    return {
+      status: "failed",
+      finalMessageId: ctx.finalMessageId,
+      planId: ctx.finalPlanId,
+      traceId: trace.id,
+      preferenceSignalRecorded: ctx.recordedPreferenceSignal,
+    };
   }
 }
 
-/** confirm/complete/skip: no model call, just a trivial trace so /trace shows every action consistently. */
+/**
+ * Deterministic-path traces: confirm/complete/skip never call the model, and
+ * swap uses this too when the Agent turn fails and code falls back to the
+ * rule-based picker -- so /trace shows every action consistently.
+ */
 export async function saveTrivialActionTrace(params: {
   userId: string;
-  trigger: "confirm" | "complete" | "skip";
+  trigger: "confirm" | "complete" | "skip" | "swap";
   goal: string;
   planId?: string;
 }) {
@@ -187,7 +211,7 @@ export async function saveTrivialActionTrace(params: {
     goal: params.goal,
     source: "DETERMINISTIC",
     status: "COMPLETE",
-    steps: [{ type: "model_text", text: "无歧义的状态转移，未调用模型，直接由代码确定性写入。" }],
+    steps: [{ type: "model_text", text: "未调用模型，由代码确定性写入。" }],
     planId: params.planId,
   });
 }
@@ -304,7 +328,13 @@ async function runMockSwapTurn(
     finalMessageId: ctx.finalMessageId,
     planId: ctx.finalPlanId,
   });
-  return { status: "complete", finalMessageId: ctx.finalMessageId, planId: ctx.finalPlanId, traceId: trace.id };
+  return {
+    status: "complete",
+    finalMessageId: ctx.finalMessageId,
+    planId: ctx.finalPlanId,
+    traceId: trace.id,
+    preferenceSignalRecorded: ctx.recordedPreferenceSignal,
+  };
 }
 
 async function call<T>(steps: TraceStep[], toolName: string, fn: () => Promise<T>): Promise<T> {

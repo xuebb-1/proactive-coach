@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/db";
-import { todayKey } from "@/lib/date";
+import { todayKey, endOfToday } from "@/lib/date";
 import { decayStalePreferences } from "@/lib/memory/preference";
 import { logEvent } from "@/lib/memory/episodic";
 import { getEngagementTrend } from "./engagement";
@@ -15,12 +15,6 @@ type FullUser = {
 
 function explicitDislikesOf(user: FullUser): string[] {
   return JSON.parse(user.profile.dislikedFoods || "[]");
-}
-
-function endOfToday(): Date {
-  const d = new Date();
-  d.setHours(23, 59, 59, 999);
-  return d;
 }
 
 /**

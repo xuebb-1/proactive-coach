@@ -32,6 +32,7 @@ model UserProfile {
   goalWeightKg    Float
   currentWeightKg Float
   dislikedFoods   String // JSON string array, explicit onboarding dislikes (separate from inferred PreferenceMemory)
+  eatingMode      String   @default("canteen") // "cook" | "canteen" | "takeout" -- decides which meal library the planner draws candidates from
   morningTime     String // "HH:mm", local display only in v1 (cron schedule itself is static)
   lunchTime       String
   eveningTime     String

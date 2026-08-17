@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/db";
 
-const DISLIKE_THRESHOLD = 0.5;
+export const DISLIKE_THRESHOLD = 0.5;
 const DECAY_AFTER_DAYS = 14;
 const DECAY_STEP = 0.1;
 const SWAP_BOOST = 0.2;
@@ -16,14 +16,53 @@ function preferKey(mealKey: string) {
 /**
  * MVP writes are rule-driven from button actions only -- no LLM extraction.
  * Swapping away from a meal repeatedly raises confidence that it's disliked.
+ *
+ * Opposite keys attenuate each other: boosting dislike:X weakens prefer:X by
+ * the same amount (and vice versa), so the system converges to ONE answer for
+ * "does the user like X" instead of letting contradictory rows grow together.
  */
 export async function recordSwap(userId: string, mealKey: string) {
   await upsertPreference(userId, dislikeKey(mealKey), "food", SWAP_BOOST, "button_action");
+  await attenuatePreference(userId, preferKey(mealKey), SWAP_BOOST);
 }
 
 /** Completing a meal (without ever swapping it) reinforces it as a preference. */
 export async function recordCompletion(userId: string, mealKey: string) {
   await upsertPreference(userId, preferKey(mealKey), "food", COMPLETE_BOOST, "button_action");
+  await attenuatePreference(userId, dislikeKey(mealKey), COMPLETE_BOOST);
+}
+
+/**
+ * Swap-attribution answers (ask_user ground truth):
+ * - "不爱吃" -> the inference is confirmed by the user: mark it, ensure it
+ *   sits safely above the filter threshold, and exempt it from decay.
+ * - "今天没有/想换口味" -> the swap was misattributed: revert that boost.
+ */
+export async function confirmDislike(userId: string, mealKey: string) {
+  const key = dislikeKey(mealKey);
+  const existing = await prisma.preferenceMemory.findUnique({ where: { userId_key: { userId, key } } });
+  if (!existing) return;
+  await prisma.preferenceMemory.update({
+    where: { id: existing.id },
+    data: {
+      confidence: Math.max(existing.confidence, DISLIKE_THRESHOLD + 0.2),
+      source: "user_confirmed",
+      lastConfirmedAt: new Date(),
+    },
+  });
+}
+
+export async function revertSwapSignal(userId: string, mealKey: string) {
+  await attenuatePreference(userId, dislikeKey(mealKey), SWAP_BOOST);
+}
+
+async function attenuatePreference(userId: string, key: string, amount: number) {
+  const existing = await prisma.preferenceMemory.findUnique({ where: { userId_key: { userId, key } } });
+  if (!existing || existing.confidence <= 0) return;
+  await prisma.preferenceMemory.update({
+    where: { id: existing.id },
+    data: { confidence: Math.max(0, existing.confidence - amount) },
+  });
 }
 
 /**
@@ -86,7 +125,9 @@ async function upsertPreference(
 export async function decayStalePreferences(userId: string) {
   const cutoff = new Date(Date.now() - DECAY_AFTER_DAYS * 24 * 60 * 60 * 1000);
   const stale = await prisma.preferenceMemory.findMany({
-    where: { userId, lastConfirmedAt: { lt: cutoff }, confidence: { gt: 0 } },
+    // user_confirmed preferences are explicit ground truth, not inference --
+    // they don't go stale the way behavioral signals do, so they skip decay.
+    where: { userId, lastConfirmedAt: { lt: cutoff }, confidence: { gt: 0 }, source: { not: "user_confirmed" } },
   });
 
   for (const pref of stale) {

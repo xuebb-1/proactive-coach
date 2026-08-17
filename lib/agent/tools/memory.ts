@@ -27,6 +27,7 @@ export const memoryImpls = {
     return {
       goalWeightKg: profile.goalWeightKg,
       currentWeightKg: profile.currentWeightKg,
+      eatingMode: profile.eatingMode as "cook" | "canteen" | "takeout",
       dislikedFoods: JSON.parse(profile.dislikedFoods || "[]") as string[],
       tonePreference: persona.tonePreference,
       motivationHook: persona.motivationHook,
@@ -42,6 +43,8 @@ export const memoryImpls = {
       category: r.category,
       confidence: r.confidence,
       evidenceCount: r.evidenceCount,
+      // "user_confirmed" = the user explicitly confirmed this via ask_user; weigh it above behavioral inference.
+      source: r.source,
       lastConfirmedAt: r.lastConfirmedAt.toISOString(),
     }));
   },
@@ -63,6 +66,7 @@ export const memoryImpls = {
 
   async recordPreferenceSignal(ctx: ToolCtx, args: { mealKey: string; signal: "dislike" | "like" }) {
     await recordPreferenceSignal(ctx.userId, args.mealKey, args.signal);
+    ctx.recordedPreferenceSignal = true;
     return { ok: true, mealKey: args.mealKey, signal: args.signal };
   },
 
@@ -82,7 +86,7 @@ export const memoryImpls = {
 export function buildMemoryTools(ctx: ToolCtx) {
   const get_user_profile = tool({
     description:
-      "读取 Tier1 用户画像与人设（目标体重、当前体重、明确不吃的食物、语气偏好、动机 hook、若为 event 类型则含事件名和倒计时天数）。每轮开始时应先调用。",
+      "读取 Tier1 用户画像与人设（目标体重、当前体重、吃饭方式 eatingMode、明确不吃的食物、语气偏好、动机 hook、若为 event 类型则含事件名和倒计时天数）。每轮开始时应先调用。",
     inputSchema: z.object({}),
     execute: async () => memoryImpls.getUserProfile(ctx),
   });

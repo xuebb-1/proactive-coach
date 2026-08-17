@@ -1,3 +1,5 @@
+export type EatingMode = "cook" | "canteen" | "takeout";
+
 export type Recipe = {
   key: string;
   title: string;
@@ -6,9 +8,17 @@ export type Recipe = {
   tags: string[];
 };
 
-// Small static library for v1. No LLM needed to generate this -- it's a
-// curated list; the "intelligence" is in filtering/ranking, not generation.
-export const RECIPES: Recipe[] = [
+// Small static libraries for v1. No LLM needed to generate these -- they're
+// curated lists; the "intelligence" is in filtering/ranking, not generation.
+//
+// The library is picked by the user's eatingMode: recommending "煎三文鱼" to
+// someone who eats at a company canteen is useless advice. For canteen/
+// takeout modes the entries are not dishes to cook but *executable ordering
+// strategies* -- things you can actually do at the serving window or in the
+// delivery app. Same Recipe shape, so the planner/guardrails don't care.
+
+/** eatingMode = "cook": dishes you make yourself. */
+export const COOK_MEALS: Recipe[] = [
   { key: "chicken_broccoli", title: "鸡胸肉 + 西兰花", kcal: 420, tags: ["鸡肉", "西兰花"] },
   { key: "salmon_salad", title: "煎三文鱼沙拉", kcal: 480, tags: ["三文鱼", "生菜"] },
   { key: "beef_stirfry", title: "牛肉时蔬炒饭（少油）", kcal: 520, tags: ["牛肉", "米饭"] },
@@ -29,6 +39,51 @@ export const RECIPES: Recipe[] = [
   { key: "cod_veggies", title: "清蒸鳕鱼时蔬", kcal: 380, tags: ["鳕鱼"] },
 ];
 
+/**
+ * eatingMode = "canteen": how to compose a tray at a company canteen.
+ * Includes a few takeout options (tagged 外卖) because canteen eaters
+ * occasionally order delivery -- the model may pick one when memory shows
+ * canteen fatigue or the user swapped away from canteen entries recently.
+ */
+export const CANTEEN_MEALS: Recipe[] = [
+  { key: "canteen_1meat2veg", title: "食堂：一荤两素 + 半份米饭（荤菜选蒸/炖，不选油炸）", kcal: 500, tags: ["食堂", "米饭"] },
+  { key: "canteen_fish_veg", title: "食堂：清蒸鱼或水煮鱼片 + 两个绿叶素菜", kcal: 450, tags: ["食堂", "鱼"] },
+  { key: "canteen_chicken_veg", title: "食堂：白切鸡/去皮鸡腿 + 素菜 + 少饭", kcal: 480, tags: ["食堂", "鸡肉"] },
+  { key: "canteen_beef_stew", title: "食堂：炖牛肉 + 两素，汤汁别浇饭", kcal: 520, tags: ["食堂", "牛肉"] },
+  { key: "canteen_tofu_egg", title: "食堂：豆腐/鸡蛋主菜 + 两素（清淡日）", kcal: 420, tags: ["食堂", "豆腐", "鸡蛋", "素食"] },
+  { key: "canteen_clear_noodle", title: "食堂：清汤面加蛋加青菜，面量减半", kcal: 450, tags: ["食堂", "面条", "鸡蛋"] },
+  { key: "canteen_2veg_egg", title: "食堂：两素一蛋 + 粗粮饭（极清淡日）", kcal: 380, tags: ["食堂", "素食", "鸡蛋"] },
+  { key: "canteen_shrimp_veg", title: "食堂：白灼虾/虾仁菜 + 素菜 + 半饭", kcal: 440, tags: ["食堂", "虾"] },
+  { key: "takeout_light_bowl", title: "外卖：轻食碗（鸡胸/牛肉沙拉，酱料减半）", kcal: 430, tags: ["外卖", "轻食", "鸡肉"] },
+  { key: "takeout_malatang_clear", title: "外卖：清汤麻辣烫（豆制品+绿叶菜+少主食）", kcal: 400, tags: ["外卖", "麻辣烫", "豆腐"] },
+  { key: "takeout_japanese_set", title: "外卖：日式定食（烤鱼/鸡肉，酱汁备注分开放）", kcal: 480, tags: ["外卖", "日式", "鱼"] },
+];
+
+/** eatingMode = "takeout": ordering strategies for delivery apps. */
+export const TAKEOUT_MEALS: Recipe[] = [
+  { key: "takeout_light_bowl2", title: "轻食碗：鸡胸肉沙拉，酱料减半或油醋汁", kcal: 430, tags: ["外卖", "轻食", "鸡肉"] },
+  { key: "takeout_malatang_clear2", title: "清汤麻辣烫：豆制品 + 绿叶菜 + 少主食", kcal: 400, tags: ["外卖", "麻辣烫", "豆腐"] },
+  { key: "takeout_japanese_set2", title: "日式定食：烤鱼或鸡肉，备注酱汁分开放", kcal: 480, tags: ["外卖", "日式", "鱼"] },
+  { key: "takeout_pho", title: "越南粉/清汤米线：加瘦肉，不喝完汤", kcal: 450, tags: ["外卖", "米线"] },
+  { key: "takeout_sushi_roll", title: "寿司/饭团套餐：避开天妇罗和蛋黄酱卷", kcal: 460, tags: ["外卖", "日式", "米饭"] },
+  { key: "takeout_chicken_bento", title: "鸡胸肉便当：备注少油少盐，饭吃一半", kcal: 470, tags: ["外卖", "鸡肉", "米饭"] },
+  { key: "takeout_veggie_congee", title: "瘦肉/皮蛋瘦肉粥 + 拍黄瓜类凉菜", kcal: 380, tags: ["外卖", "粥", "猪肉"] },
+  { key: "takeout_grilled_fish_light", title: "轻烤鱼套餐：选清香/蒜香锅底，配菜多拿豆腐青菜", kcal: 520, tags: ["外卖", "鱼", "豆腐"] },
+];
+
+const LIBRARIES: Record<EatingMode, Recipe[]> = {
+  cook: COOK_MEALS,
+  canteen: CANTEEN_MEALS,
+  takeout: TAKEOUT_MEALS,
+};
+
+export function getMealLibrary(mode: string): Recipe[] {
+  return LIBRARIES[(mode as EatingMode) in LIBRARIES ? (mode as EatingMode) : "canteen"];
+}
+
+const ALL_MEALS: Recipe[] = [...COOK_MEALS, ...CANTEEN_MEALS, ...TAKEOUT_MEALS];
+
+/** Lookup across all libraries -- used by the whitelist's last-resort check and title/kcal resolution. */
 export function getRecipeByKey(key: string): Recipe | undefined {
-  return RECIPES.find((r) => r.key === key);
+  return ALL_MEALS.find((r) => r.key === key);
 }

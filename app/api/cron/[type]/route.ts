@@ -3,6 +3,10 @@ import { requireCurrentUser } from "@/lib/user";
 import { runMorning, runLunch, runEvening } from "@/lib/orchestrator/daily-orchestrator";
 
 export const dynamic = "force-dynamic";
+// Real Agent turns take 15-80s (measured); Vercel's default function timeout
+// would kill them mid-turn. 300s requires Fluid Compute (default on new
+// projects) -- without it the platform clamps to the plan's max.
+export const maxDuration = 300;
 
 const HANDLERS = {
   morning: runMorning,

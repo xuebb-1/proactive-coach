@@ -1,13 +1,8 @@
 import { z } from "zod";
 import { tool } from "ai";
 import { prisma } from "@/lib/db";
+import { endOfToday } from "@/lib/date";
 import type { ToolCtx } from "./context";
-
-function endOfToday(): Date {
-  const d = new Date();
-  d.setHours(23, 59, 59, 999);
-  return d;
-}
 
 export const messagingImpls = {
   async sendProactiveMessage(
@@ -42,6 +37,8 @@ export const messagingImpls = {
       type: "MORNING" | "LUNCH" | "EVENING";
       question: string;
       options: Array<{ label: string; value: string }>;
+      /** Structured intent for code-driven asks (e.g. swap attribution); not exposed to the model's tool schema. */
+      extraPayload?: Record<string, unknown>;
     }
   ) {
     const message = await prisma.message.create({
@@ -51,7 +48,7 @@ export const messagingImpls = {
         type: args.type,
         text: args.question,
         require: "ASK_USER",
-        payload: JSON.stringify({ question: args.question, options: args.options }),
+        payload: JSON.stringify({ question: args.question, options: args.options, ...(args.extraPayload ?? {}) }),
         expiresAt: endOfToday(),
       },
     });

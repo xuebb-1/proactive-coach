@@ -10,6 +10,9 @@ import { DevTriggerPanel } from "@/app/components/DevTriggerPanel";
 // reflects live DB state (today's messages, plan status) that changes
 // throughout the day as cron triggers and button actions fire.
 export const dynamic = "force-dynamic";
+// The swap button's Server Action runs an Agent turn (15-80s measured);
+// Server Actions inherit the invoking page's maxDuration.
+export const maxDuration = 300;
 
 export default async function TodayPage() {
   const user = await getCurrentUser();
@@ -26,16 +29,34 @@ export default async function TodayPage() {
     where: { userId_date_type: { userId: user.id, date: dateKey, type: "EVENING" } },
   });
 
-  const [morningMessage, lunchMessage, eveningMessage] = await Promise.all([
+  // Slot messages exclude ASK_USER: a clarification question typed MORNING
+  // must not hijack the morning slot. Ordered by createdAt so the result is
+  // deterministic if a slot ever ends up with more than one message.
+  const [morningMessage, lunchMessage, eveningMessage, askUserMessages] = await Promise.all([
     morningPlan
-      ? prisma.message.findFirst({ where: { planId: morningPlan.id, type: "MORNING" } })
+      ? prisma.message.findFirst({
+          where: { planId: morningPlan.id, type: "MORNING", require: { not: "ASK_USER" } },
+          orderBy: { createdAt: "asc" },
+        })
       : null,
     morningPlan
-      ? prisma.message.findFirst({ where: { planId: morningPlan.id, type: "LUNCH" } })
+      ? prisma.message.findFirst({
+          where: { planId: morningPlan.id, type: "LUNCH", require: { not: "ASK_USER" } },
+          orderBy: { createdAt: "asc" },
+        })
       : null,
     eveningPlan
-      ? prisma.message.findFirst({ where: { planId: eveningPlan.id, type: "EVENING" } })
+      ? prisma.message.findFirst({
+          where: { planId: eveningPlan.id, type: "EVENING", require: { not: "ASK_USER" } },
+          orderBy: { createdAt: "asc" },
+        })
       : null,
+    // ask_user messages may have no plan attached at all -- fetch them by
+    // require, not via the plan, or they'd never surface.
+    prisma.message.findMany({
+      where: { userId: user.id, require: "ASK_USER", respondedAt: null, expiresAt: { gte: new Date() } },
+      orderBy: { createdAt: "desc" },
+    }),
   ]);
 
   const todaysCheckin = await prisma.checkIn.findFirst({ where: { userId: user.id, date: dateKey } });
@@ -70,6 +91,9 @@ export default async function TodayPage() {
       </header>
 
       <div className="flex flex-col gap-3">
+        {askUserMessages.map((m) => (
+          <MessageCard key={m.id} message={m} plan={null} />
+        ))}
         {morningMessage && (
           <MessageCard message={morningMessage} plan={morningPlan ? { status: morningPlan.status } : null} />
         )}
@@ -84,7 +108,7 @@ export default async function TodayPage() {
           />
         )}
 
-        {!morningMessage && !lunchMessage && !eveningMessage && (
+        {!morningMessage && !lunchMessage && !eveningMessage && askUserMessages.length === 0 && (
           <div className="rounded-xl border border-dashed border-neutral-300 p-6 text-center text-sm text-neutral-400">
             还没有新消息。它会在设定时间主动来找你。
           </div>

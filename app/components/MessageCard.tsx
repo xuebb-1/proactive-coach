@@ -102,7 +102,18 @@ export function MessageCard({
         </div>
       )}
       {answered && message.require === "ASK_USER" && (
-        <p className="mt-3 text-sm text-neutral-500">已选择：{message.responseAction}</p>
+        <p className="mt-3 text-sm text-neutral-500">
+          已选择：
+          {(() => {
+            try {
+              const options: Array<{ label: string; value: string }> =
+                JSON.parse(message.payload || "{}").options ?? [];
+              return options.find((o) => o.value === message.responseAction)?.label ?? message.responseAction;
+            } catch {
+              return message.responseAction;
+            }
+          })()}
+        </p>
       )}
 
       {message.require === "CHECKIN" &&

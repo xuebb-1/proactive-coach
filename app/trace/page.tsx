@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { prisma } from "@/lib/db";
 import { getCurrentUser } from "@/lib/user";
 import { parseTraceSteps, type TraceStep } from "@/lib/agent/trace";
+import { getWeeklySwapTrend, getRepeatMistakeStats, getInferencePrecision } from "@/lib/memory/metrics";
 
 export const dynamic = "force-dynamic";
 
@@ -81,11 +82,18 @@ export default async function TracePage() {
     redirect("/onboarding");
   }
 
-  const traces = await prisma.agentTrace.findMany({
-    where: { userId: user.id },
-    orderBy: { createdAt: "desc" },
-    take: 30,
-  });
+  const [traces, swapTrend, repeatStats, precision] = await Promise.all([
+    prisma.agentTrace.findMany({
+      where: { userId: user.id },
+      orderBy: { createdAt: "desc" },
+      take: 30,
+    }),
+    getWeeklySwapTrend(user.id),
+    getRepeatMistakeStats(user.id),
+    getInferencePrecision(user.id),
+  ]);
+
+  const pct = (v: number | null) => (v === null ? "—" : `${Math.round(v * 100)}%`);
 
   return (
     <main className="mx-auto max-w-2xl px-6 py-10">
@@ -98,6 +106,40 @@ export default async function TracePage() {
           ← 今天
         </Link>
       </header>
+
+      <section className="mb-6">
+        <h2 className="text-xs font-medium uppercase tracking-wide text-neutral-400">
+          记忆有效性 · 记的东西有没有让决策变好
+        </h2>
+        <div className="mt-2 grid grid-cols-3 gap-2">
+          <div className="rounded-xl border border-neutral-200 bg-white p-3">
+            <p className="text-xs text-neutral-400">换菜率（周）</p>
+            <p className="mt-1 text-lg font-semibold text-neutral-900">
+              {pct(swapTrend[swapTrend.length - 1]?.rate ?? null)}
+            </p>
+            <p className="mt-1 text-[11px] leading-4 text-neutral-400">
+              {swapTrend.map((p) => `${p.label} ${pct(p.rate)}`).join(" · ")}
+            </p>
+            <p className="mt-1 text-[11px] text-neutral-400">偏好学习有效则应逐周下降</p>
+          </div>
+          <div className="rounded-xl border border-neutral-200 bg-white p-3">
+            <p className="text-xs text-neutral-400">重复踩坑率</p>
+            <p className="mt-1 text-lg font-semibold text-neutral-900">{pct(repeatStats.rate)}</p>
+            <p className="mt-1 text-[11px] leading-4 text-neutral-400">
+              已拒绝过的菜/类目再推 {repeatStats.repeatRecommended} 次，其中又被换 {repeatStats.repeatSwapped} 次
+            </p>
+            <p className="mt-1 text-[11px] text-neutral-400">高 = 记了但决策没用上</p>
+          </div>
+          <div className="rounded-xl border border-neutral-200 bg-white p-3">
+            <p className="text-xs text-neutral-400">推断准确率</p>
+            <p className="mt-1 text-lg font-semibold text-neutral-900">{pct(precision.precision)}</p>
+            <p className="mt-1 text-[11px] leading-4 text-neutral-400">
+              归因询问 {precision.asked} 次，确认不爱吃 {precision.confirmed} 次
+            </p>
+            <p className="mt-1 text-[11px] text-neutral-400">低 = swap→dislike 归因在产生噪音</p>
+          </div>
+        </div>
+      </section>
 
       {traces.length === 0 && (
         <div className="rounded-xl border border-dashed border-neutral-300 p-6 text-center text-sm text-neutral-400">
