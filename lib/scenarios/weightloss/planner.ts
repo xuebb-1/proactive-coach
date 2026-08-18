@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/db";
 import { getActiveDislikedMealKeys } from "@/lib/memory/preference";
-import { getMealLibrary, type Recipe } from "./recipes";
+import { getMealLibrary, type Recipe } from "./meals";
 
 const RECENT_REPEAT_WINDOW_DAYS = 3;
 

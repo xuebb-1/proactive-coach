@@ -85,9 +85,14 @@ export default async function TodayPage() {
             目标 {user.profile.goalWeightKg}kg · 当前 {latestWeight}kg
           </p>
         </div>
-        <Link href="/trace" className="text-sm text-neutral-500 underline-offset-2 hover:text-neutral-900 hover:underline">
-          Trace →
-        </Link>
+        <div className="flex shrink-0 gap-3">
+          <Link href="/meals" className="text-sm text-neutral-500 underline-offset-2 hover:text-neutral-900 hover:underline">
+            菜品库
+          </Link>
+          <Link href="/trace" className="text-sm text-neutral-500 underline-offset-2 hover:text-neutral-900 hover:underline">
+            Trace →
+          </Link>
+        </div>
       </header>
 
       <div className="flex flex-col gap-3">

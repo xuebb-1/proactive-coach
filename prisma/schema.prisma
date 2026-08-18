@@ -40,6 +40,25 @@ model UserProfile {
   updatedAt       DateTime @updatedAt
 }
 
+// Domain knowledge base: the meal library the planner draws candidates from.
+// Editable at /meals. "Delete" is deactivation (isActive=false), not row
+// removal: DailyPlan.mealKey / EpisodicLog.mealKey reference keys loosely, and
+// metrics must keep resolving titles/tags for historical entries.
+model Meal {
+  id        String   @id @default(cuid())
+  key       String   @unique // stable id referenced by DailyPlan.mealKey and EpisodicLog.mealKey
+  title     String
+  kcal      Int
+  tags      String[] // ingredient/style tags, matched against dislikedFoods substrings
+  mode      String // "cook" | "canteen" | "takeout"
+  isActive  Boolean  @default(true)
+  source    String   @default("seed") // "seed" | "user"
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([mode, isActive])
+}
+
 // Tier 1 memory: static persona dimensions, collected explicitly at onboarding.
 model PersonaProfile {
   id             String    @id @default(cuid())

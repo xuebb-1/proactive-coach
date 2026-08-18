@@ -14,7 +14,7 @@
 | `search_preferences` | 按 category/confidence 查 Tier2 |
 | `get_recent_episodes` | 读近 N 天 Tier3 事件 |
 | `get_engagement_trend` | 参与度趋势（近 7 天 vs 前 7 天完成率） |
-| `list_candidate_meals` | 候选（已按偏好/重复过滤），模型只能从这里选，不能编菜名。候选库随用户的吃饭方式切换：自己做饭是菜谱，吃食堂是打菜策略，点外卖是下单策略——推荐必须是用户真能执行的动作 |
+| `list_candidate_meals` | 候选（已按偏好/重复过滤），模型只能从这里选，不能编菜名。候选来自 `Meal` 表（结构化知识库，`/meals` 页可增删改），随用户的吃饭方式切换：自己做饭是菜谱，吃食堂是打菜策略，点外卖是下单策略——推荐必须是用户真能执行的动作 |
 | `create_daily_plan` / `update_daily_plan` | 写入/更新当日计划（`upsert` 语义，mealKey 会被代码白名单校验） |
 | `send_proactive_message` / `ask_user` | 把最终文案或澄清问题写入 Feed，二选一，是本轮通常的最后一步 |
 | `record_preference_signal` | 记录一次离散的「喜欢/不喜欢」信号——置信度的增量由代码算，模型不能直接给数值 |
@@ -89,8 +89,9 @@ DEEPSEEK_MODEL=deepseek-v4-pro   # 或 deepseek-v4-flash；旧别名 deepseek-ch
 
 ```
 app/
-  page.tsx              今日卡（唯一主界面，链到 /trace）
+  page.tsx              今日卡（主界面，链到 /trace 和 /meals）
   trace/page.tsx         Agent Trace 可观测面板
+  meals/page.tsx         菜品知识库管理页（增/改/停用，停用不删行——历史计划靠 key 回查）
   onboarding/page.tsx    首次引导表单
   actions.ts             Server Actions（按钮点击、体重打卡、onboarding 提交）
   api/cron/[type]/       Vercel Cron 调用的三个每日触发端点
@@ -107,7 +108,7 @@ lib/
   date.ts                日期 key 工具
   memory/                Tier 2 / Tier 3 记忆读写
   orchestrator/          Cron 触发入口、参与度计算、按钮状态机（confirm/complete/skip 走这里，不经 Agent）
-  scenarios/weightloss/  减肥场景的候选库（按吃饭方式分自炊/食堂/外卖三套）与过滤逻辑（Agent 的工具数据源，唯一场景，未做插件抽象）
+  scenarios/weightloss/  减肥场景的候选读取（meals.ts 查 Meal 表，按吃饭方式分自炊/食堂/外卖）与过滤逻辑（Agent 的工具数据源，唯一场景，未做插件抽象）
 prisma/
   schema.prisma          数据模型（含 AgentTrace）
 ```

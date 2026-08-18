@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/db";
-import { getRecipeByKey } from "@/lib/scenarios/weightloss/recipes";
+import { getRecipesByKeys } from "@/lib/scenarios/weightloss/meals";
 
 /**
  * Memory-effectiveness metrics, computed read-only from the Tier3 episodic
@@ -63,6 +63,8 @@ export async function getRepeatMistakeStats(userId: string): Promise<RepeatMista
     select: { eventType: true, mealKey: true, createdAt: true },
   });
 
+  const mealsByKey = await getRecipesByKeys(events.map((e) => e.mealKey!));
+
   const rejectedKeys = new Set<string>();
   const rejectedTags = new Set<string>();
   let repeatRecommended = 0;
@@ -73,11 +75,11 @@ export async function getRepeatMistakeStats(userId: string): Promise<RepeatMista
     const key = e.mealKey!;
     if (e.eventType === "ACTION_SWAP") {
       rejectedKeys.add(key);
-      for (const tag of getRecipeByKey(key)?.tags ?? []) rejectedTags.add(tag);
+      for (const tag of mealsByKey.get(key)?.tags ?? []) rejectedTags.add(tag);
       continue;
     }
     // PLAN_GENERATED: was this a "known rejected" recommendation at this point in time?
-    const tags = getRecipeByKey(key)?.tags ?? [];
+    const tags = mealsByKey.get(key)?.tags ?? [];
     const isRepeat = rejectedKeys.has(key) || tags.some((t) => rejectedTags.has(t));
     if (!isRepeat) continue;
     repeatRecommended++;

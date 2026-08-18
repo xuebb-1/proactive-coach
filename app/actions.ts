@@ -86,3 +86,45 @@ export async function createOnboardingAction(formData: FormData) {
   revalidatePath("/");
   redirect("/");
 }
+
+// ---------- Meal knowledge base (/meals) ----------
+
+const MEAL_MODES = ["cook", "canteen", "takeout"] as const;
+
+function parseMealForm(formData: FormData) {
+  const title = String(formData.get("title") || "").trim();
+  const kcal = Number(formData.get("kcal"));
+  const modeRaw = String(formData.get("mode") || "canteen");
+  const mode = (MEAL_MODES as readonly string[]).includes(modeRaw) ? modeRaw : "canteen";
+  // Tags drive the dislike filter (substring match) -- empty tags mean the
+  // dislike guardrail can only match against the title.
+  const tags = String(formData.get("tags") || "")
+    .split(/[,，]/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  if (!title) throw new Error("菜名不能为空");
+  if (!Number.isFinite(kcal) || kcal <= 0 || kcal > 3000) throw new Error("热量应为 1-3000 kcal");
+  return { title, kcal: Math.round(kcal), mode, tags };
+}
+
+export async function createMealAction(formData: FormData) {
+  const data = parseMealForm(formData);
+  const key = `user_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+  await prisma.meal.create({ data: { key, source: "user", ...data } });
+  revalidatePath("/meals");
+}
+
+export async function updateMealAction(formData: FormData) {
+  const id = String(formData.get("id"));
+  const data = parseMealForm(formData);
+  await prisma.meal.update({ where: { id }, data });
+  revalidatePath("/meals");
+}
+
+export async function toggleMealAction(formData: FormData) {
+  const id = String(formData.get("id"));
+  const meal = await prisma.meal.findUniqueOrThrow({ where: { id }, select: { isActive: true } });
+  await prisma.meal.update({ where: { id }, data: { isActive: !meal.isActive } });
+  revalidatePath("/meals");
+}

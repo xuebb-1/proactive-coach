@@ -2,7 +2,7 @@ import { z } from "zod";
 import { tool } from "ai";
 import { prisma } from "@/lib/db";
 import { getCandidateMeals } from "@/lib/scenarios/weightloss/planner";
-import { getRecipeByKey } from "@/lib/scenarios/weightloss/recipes";
+import { getRecipeByKey } from "@/lib/scenarios/weightloss/meals";
 import { endOfToday } from "@/lib/date";
 import { logEvent } from "@/lib/memory/episodic";
 import type { ToolCtx } from "./context";
@@ -43,7 +43,7 @@ export const planningImpls = {
     let meal: { title: string; kcal: number } | undefined;
     if (args.mealKey) {
       assertValidMealKey(ctx, args.mealKey);
-      meal = getRecipeByKey(args.mealKey);
+      meal = await getRecipeByKey(args.mealKey);
     }
     const existed = await prisma.dailyPlan.findUnique({
       where: { userId_date_type: { userId: ctx.userId, date: ctx.dateKey, type: args.type } },
@@ -88,7 +88,7 @@ export const planningImpls = {
     let meal: { title: string; kcal: number } | undefined;
     if (args.mealKey) {
       assertValidMealKey(ctx, args.mealKey);
-      meal = getRecipeByKey(args.mealKey);
+      meal = await getRecipeByKey(args.mealKey);
     }
     const plan = await prisma.dailyPlan.update({
       where: { id: args.planId },
