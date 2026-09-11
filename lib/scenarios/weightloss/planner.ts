@@ -10,7 +10,7 @@ async function getLibraryForUser(userId: string): Promise<Recipe[]> {
     where: { userId },
     select: { eatingMode: true },
   });
-  return getMealLibrary(profile?.eatingMode ?? "canteen");
+  return getMealLibrary(userId, profile?.eatingMode ?? "canteen");
 }
 
 function hashToIndex(seed: string, mod: number): number {

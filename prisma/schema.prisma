@@ -12,10 +12,12 @@ datasource db {
 
 model User {
   id        String   @id @default(cuid())
+  clerkId   String?  @unique
   createdAt DateTime @default(now())
 
   profile      UserProfile?
   persona      PersonaProfile?
+  ownedMeals   Meal[]
   dailyPlans   DailyPlan[]
   checkIns     CheckIn[]
   messages     Message[]
@@ -36,6 +38,8 @@ model UserProfile {
   morningTime     String // "HH:mm", local display only in v1 (cron schedule itself is static)
   lunchTime       String
   eveningTime     String
+  timezone        String   @default("Asia/Shanghai")
+  scenarioId      String   @default("weightloss")
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 }
@@ -53,10 +57,12 @@ model Meal {
   mode      String // "cook" | "canteen" | "takeout"
   isActive  Boolean  @default(true)
   source    String   @default("seed") // "seed" | "user"
+  ownerId   String?
+  owner     User?    @relation(fields: [ownerId], references: [id])
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@index([mode, isActive])
+  @@index([mode, isActive, ownerId])
 }
 
 // Tier 1 memory: static persona dimensions, collected explicitly at onboarding.
@@ -129,6 +135,7 @@ model Message {
   expiresAt      DateTime?
   respondedAt    DateTime?
   responseAction String? // "confirm" | "swap" | "complete" | "skip"
+  dedupeKey      String?        @unique
   createdAt      DateTime       @default(now())
 }
 
@@ -164,6 +171,8 @@ model CheckIn {
   weightKg   Float?
   difficulty Int? // 1-5 subjective difficulty, optional
   createdAt  DateTime @default(now())
+
+  @@unique([userId, date])
 }
 
 // Tier 2 memory: distilled, confidence-weighted preferences. MVP writes are
@@ -199,15 +208,22 @@ enum AgentTraceStatus {
 // Observability layer: one row per Agent turn (cron trigger 或按钮 action)。
 // steps 是本轮 model 文本 / tool 调用 / tool 结果的顺序记录，供 /trace 展开查看。
 model AgentTrace {
-  id             String            @id @default(cuid())
+  id             String           @id @default(cuid())
   userId         String
-  user           User              @relation(fields: [userId], references: [id])
+  user           User             @relation(fields: [userId], references: [id])
   trigger        String // "morning" | "lunch" | "evening" | "swap" | "confirm" | "complete" | "skip"
   goal           String // 本轮任务描述，喂给模型的 goal prompt 摘要
   source         AgentTraceSource
-  status         AgentTraceStatus  @default(COMPLETE)
+  status         AgentTraceStatus @default(COMPLETE)
   steps          String // JSON array of TraceStep
   finalMessageId String?
   planId         String?
-  createdAt      DateTime          @default(now())
+  durationMs     Int?
+  stepCount      Int?
+  model          String?
+  inputTokens    Int?
+  outputTokens   Int?
+  delivery       String?
+  failureKind    String?
+  createdAt      DateTime         @default(now())
 }

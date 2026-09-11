@@ -1,5 +1,5 @@
 import { createOnboardingAction } from "@/app/actions";
-import { prisma } from "@/lib/db";
+import { getCurrentUser } from "@/lib/user";
 import { redirect } from "next/navigation";
 
 // Must check the DB per-request (not at build time) to decide whether to
@@ -7,8 +7,8 @@ import { redirect } from "next/navigation";
 export const dynamic = "force-dynamic";
 
 export default async function OnboardingPage() {
-  const existing = await prisma.user.findFirst();
-  if (existing) redirect("/");
+  const existing = await getCurrentUser();
+  if (existing?.profile && existing.persona) redirect("/");
 
   return (
     <main className="mx-auto max-w-md px-6 py-12">
@@ -80,8 +80,18 @@ export default async function OnboardingPage() {
             </label>
           </div>
           <p className="text-xs text-neutral-400">
-            v1 的实际触发时间由部署时的 Vercel Cron 配置决定，这里先记录你的偏好。
+            系统会按你的时区和这些时间主动提醒。
           </p>
+          <label className="flex flex-col gap-1 text-sm">
+            时区
+            <select name="timezone" defaultValue="Asia/Shanghai" className="rounded-lg border border-neutral-300 px-3 py-2">
+              <option value="Asia/Shanghai">中国标准时间</option>
+              <option value="Asia/Tokyo">日本标准时间</option>
+              <option value="Europe/London">伦敦时间</option>
+              <option value="America/Los_Angeles">美国太平洋时间</option>
+              <option value="America/New_York">美国东部时间</option>
+            </select>
+          </label>
         </section>
 
         <section className="flex flex-col gap-3">

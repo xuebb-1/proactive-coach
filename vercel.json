@@ -1,8 +1,3 @@
 {
-  "regions": ["sin1"],
-  "crons": [
-    { "path": "/api/cron/morning", "schedule": "30 23 * * *" },
-    { "path": "/api/cron/lunch", "schedule": "0 4 * * *" },
-    { "path": "/api/cron/evening", "schedule": "30 12 * * *" }
-  ]
+  "regions": ["sin1"]
 }

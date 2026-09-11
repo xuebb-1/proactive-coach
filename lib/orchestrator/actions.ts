@@ -7,10 +7,13 @@ import {
   DISLIKE_THRESHOLD,
 } from "@/lib/memory/preference";
 import { logEvent } from "@/lib/memory/episodic";
-import { todayKey } from "@/lib/date";
+import {
+  endOfDayForTimeZone,
+  startOfDayForTimeZone,
+  todayKeyForTimeZone,
+} from "@/lib/date";
 import { runActionTurn, saveTrivialActionTrace } from "@/lib/agent/runner";
-import { buildSwapGoal } from "@/lib/agent/prompts";
-import { pickSwapMeal } from "@/lib/scenarios/weightloss/planner";
+import { getScenario } from "@/lib/scenarios/registry";
 import { messagingImpls } from "@/lib/agent/tools/messaging";
 import { createToolCtx } from "@/lib/agent/tools/context";
 
@@ -33,6 +36,14 @@ export async function respondToMessage(userId: string, messageId: string, action
   });
   if (!message || message.userId !== userId) throw new Error("Message not found");
   if (!message.plan) throw new Error("Message has no associated plan");
+  if (message.respondedAt) throw new Error("Message already responded");
+  const allowedActions: Partial<Record<typeof message.require, ButtonAction[]>> = {
+    CONFIRM_OR_SWAP: ["confirm", "swap"],
+    CONFIRM_OR_SKIP: ["complete", "skip"],
+  };
+  if (!allowedActions[message.require]?.includes(action)) {
+    throw new Error("Action is not allowed for this message");
+  }
 
   const plan = message.plan;
 
@@ -44,9 +55,11 @@ export async function respondToMessage(userId: string, messageId: string, action
     const profile = await prisma.userProfile.findUnique({ where: { userId } });
     const explicitDislikes: string[] = JSON.parse(profile?.dislikedFoods || "[]");
     const oldMealKey = plan.mealKey ?? "";
-    const dateKey = todayKey();
+    const timezone = profile?.timezone ?? "Asia/Shanghai";
+    const dateKey = todayKeyForTimeZone(timezone);
+    const scenario = getScenario(profile?.scenarioId);
 
-    const goal = buildSwapGoal({
+    const goal = scenario.buildSwapGoal({
       dateKey,
       planId: plan.id,
       oldMealKey,
@@ -60,6 +73,9 @@ export async function respondToMessage(userId: string, messageId: string, action
       dateKey,
       explicitDislikedFoods: explicitDislikes,
       planId: plan.id,
+      previousMealKey: oldMealKey,
+      dayEndsAt: endOfDayForTimeZone(timezone),
+      scenarioId: scenario.id,
     });
 
     // The Agent turn can fail or finish without actually changing the meal.
@@ -68,7 +84,7 @@ export async function respondToMessage(userId: string, messageId: string, action
     const updatedPlan = await prisma.dailyPlan.findUnique({ where: { id: plan.id } });
     const mealChanged = !!updatedPlan?.mealKey && updatedPlan.mealKey !== oldMealKey;
     if (!mealChanged) {
-      const newMeal = await pickSwapMeal(userId, dateKey, oldMealKey, explicitDislikes);
+      const newMeal = await scenario.pickSwapMeal(userId, dateKey, oldMealKey, explicitDislikes);
       await prisma.dailyPlan.update({
         where: { id: plan.id },
         data: { mealKey: newMeal.key, mealTitle: newMeal.title, kcal: newMeal.kcal, status: "SWAPPED" },
@@ -96,6 +112,7 @@ export async function respondToMessage(userId: string, messageId: string, action
         mealKey: oldMealKey,
         mealTitle: plan.mealTitle ?? oldMealKey,
         dateKey,
+        timezone,
       });
     }
   } else if (action === "complete") {
@@ -135,15 +152,16 @@ async function maybeAskSwapAttribution(params: {
   mealKey: string;
   mealTitle: string;
   dateKey: string;
+  timezone: string;
 }) {
-  const { userId, planId, mealKey, mealTitle, dateKey } = params;
+  const { userId, planId, mealKey, mealTitle, dateKey, timezone } = params;
 
   const pref = await prisma.preferenceMemory.findUnique({
     where: { userId_key: { userId, key: `dislike:${mealKey}` } },
   });
   if (!pref || pref.confidence < DISLIKE_THRESHOLD || pref.source === "user_confirmed") return;
 
-  const startOfDay = new Date(`${dateKey}T00:00:00+08:00`);
+  const startOfDay = startOfDayForTimeZone(timezone, new Date());
   const askedToday = await prisma.message.findFirst({
     where: { userId, require: "ASK_USER", createdAt: { gte: startOfDay } },
   });
@@ -164,14 +182,14 @@ async function maybeAskSwapAttribution(params: {
 }
 
 export async function submitCheckin(userId: string, weightKg: number, difficulty?: number) {
-  const dateKey = todayKey();
+  const profile = await prisma.userProfile.findUnique({ where: { userId }, select: { timezone: true } });
+  const dateKey = todayKeyForTimeZone(profile?.timezone ?? "Asia/Shanghai");
 
-  const existing = await prisma.checkIn.findFirst({ where: { userId, date: dateKey } });
-  if (existing) {
-    await prisma.checkIn.update({ where: { id: existing.id }, data: { weightKg, difficulty } });
-  } else {
-    await prisma.checkIn.create({ data: { userId, date: dateKey, weightKg, difficulty } });
-  }
+  await prisma.checkIn.upsert({
+    where: { userId_date: { userId, date: dateKey } },
+    create: { userId, date: dateKey, weightKg, difficulty },
+    update: { weightKg, difficulty },
+  });
 
   await logEvent({ userId, eventType: "CHECKIN", metadata: { weightKg, difficulty } });
 

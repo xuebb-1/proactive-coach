@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { prisma } from "@/lib/db";
 import { createMealAction, updateMealAction, toggleMealAction } from "@/app/actions";
+import { requireCurrentUser } from "@/lib/user";
 
 export const dynamic = "force-dynamic";
 
@@ -66,7 +67,9 @@ function MealForm({
 }
 
 export default async function MealsPage() {
+  const user = await requireCurrentUser();
   const meals = await prisma.meal.findMany({
+    where: { OR: [{ ownerId: null }, { ownerId: user.id }] },
     orderBy: [{ mode: "asc" }, { isActive: "desc" }, { createdAt: "asc" }],
   });
   const byMode = new Map<string, typeof meals>();
@@ -103,36 +106,43 @@ export default async function MealsPage() {
               {MODE_LABELS[mode] ?? mode} · {list.filter((m) => m.isActive).length} 启用 / {list.length} 条
             </h2>
             <ul className="flex flex-col gap-2">
-              {list.map((meal) => (
-                <li
-                  key={meal.id}
-                  className={`rounded-xl border p-3 ${meal.isActive ? "border-neutral-200" : "border-dashed border-neutral-300 opacity-60"}`}
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <p className="text-sm text-neutral-900">{meal.title}</p>
-                      <p className="mt-0.5 text-xs text-neutral-400">
-                        {meal.kcal} kcal · {meal.tags.length > 0 ? meal.tags.join(" / ") : "无标签"}
-                        {meal.source === "user" && " · 自己录的"}
-                        {!meal.isActive && " · 已停用"}
-                      </p>
+              {list.map((meal) => {
+                const editable = meal.ownerId === user.id && meal.source === "user";
+                return (
+                  <li
+                    key={meal.id}
+                    className={`rounded-xl border p-3 ${meal.isActive ? "border-neutral-200" : "border-dashed border-neutral-300 opacity-60"}`}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="text-sm text-neutral-900">{meal.title}</p>
+                        <p className="mt-0.5 text-xs text-neutral-400">
+                          {meal.kcal} kcal · {meal.tags.length > 0 ? meal.tags.join(" / ") : "无标签"}
+                          {meal.source === "user" && " · 自己录的"}
+                          {!meal.isActive && " · 已停用"}
+                        </p>
+                      </div>
+                      {editable && (
+                        <form action={toggleMealAction} className="shrink-0">
+                          <input type="hidden" name="id" value={meal.id} />
+                          <button
+                            type="submit"
+                            className="rounded-md border border-neutral-300 px-2.5 py-1 text-xs text-neutral-600 hover:bg-neutral-100"
+                          >
+                            {meal.isActive ? "停用" : "启用"}
+                          </button>
+                        </form>
+                      )}
                     </div>
-                    <form action={toggleMealAction} className="shrink-0">
-                      <input type="hidden" name="id" value={meal.id} />
-                      <button
-                        type="submit"
-                        className="rounded-md border border-neutral-300 px-2.5 py-1 text-xs text-neutral-600 hover:bg-neutral-100"
-                      >
-                        {meal.isActive ? "停用" : "启用"}
-                      </button>
-                    </form>
-                  </div>
-                  <details className="mt-1">
-                    <summary className="cursor-pointer select-none text-xs text-neutral-400 hover:text-neutral-600">编辑</summary>
-                    <MealForm action={updateMealAction} meal={meal} submitLabel="保存" />
-                  </details>
-                </li>
-              ))}
+                    {editable && (
+                      <details className="mt-1">
+                        <summary className="cursor-pointer select-none text-xs text-neutral-400 hover:text-neutral-600">编辑</summary>
+                        <MealForm action={updateMealAction} meal={meal} submitLabel="保存" />
+                      </details>
+                    )}
+                  </li>
+                );
+              })}
             </ul>
           </section>
         );

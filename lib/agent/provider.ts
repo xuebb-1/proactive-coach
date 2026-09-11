@@ -14,11 +14,15 @@ export function getAgentMode(): AgentMode {
 
 let deepseekProvider: ReturnType<typeof createDeepSeek> | null = null;
 
+export function getModelId() {
+  return process.env.DEEPSEEK_MODEL ?? "deepseek-v4-pro";
+}
+
 export function getModel() {
   if (!deepseekProvider) {
     deepseekProvider = createDeepSeek({ apiKey: process.env.DEEPSEEK_API_KEY });
   }
   // deepseek-chat/deepseek-reasoner 是已退役的旧别名（2026-07-24 起停用），
   // 现在的正式 model id 是 deepseek-v4-pro / deepseek-v4-flash。
-  return deepseekProvider(process.env.DEEPSEEK_MODEL ?? "deepseek-v4-pro");
+  return deepseekProvider(getModelId());
 }

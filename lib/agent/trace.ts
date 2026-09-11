@@ -17,6 +17,13 @@ export async function saveTrace(opts: {
   steps: TraceStep[];
   finalMessageId?: string | null;
   planId?: string | null;
+  durationMs?: number;
+  stepCount?: number;
+  model?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  delivery?: "agent" | "fallback" | "none" | "deterministic";
+  failureKind?: string;
 }) {
   return prisma.agentTrace.create({
     data: {
@@ -28,6 +35,13 @@ export async function saveTrace(opts: {
       steps: JSON.stringify(opts.steps),
       finalMessageId: opts.finalMessageId ?? undefined,
       planId: opts.planId ?? undefined,
+      durationMs: opts.durationMs,
+      stepCount: opts.stepCount,
+      model: opts.model,
+      inputTokens: opts.inputTokens,
+      outputTokens: opts.outputTokens,
+      delivery: opts.delivery,
+      failureKind: opts.failureKind,
     },
   });
 }

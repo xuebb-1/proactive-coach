@@ -1,8 +1,7 @@
 import { z } from "zod";
 import { tool } from "ai";
 import { prisma } from "@/lib/db";
-import { getCandidateMeals } from "@/lib/scenarios/weightloss/planner";
-import { getRecipeByKey } from "@/lib/scenarios/weightloss/meals";
+import { getScenario } from "@/lib/scenarios/registry";
 import { endOfToday } from "@/lib/date";
 import { logEvent } from "@/lib/memory/episodic";
 import type { ToolCtx } from "./context";
@@ -34,7 +33,11 @@ export const planningImpls = {
     ctx: ToolCtx,
     args: { explicitDislikedFoods: string[]; excludeMealKeys?: string[] }
   ) {
-    const candidates = await getCandidateMeals(ctx.userId, args.explicitDislikedFoods, args.excludeMealKeys ?? []);
+    const candidates = await getScenario(ctx.scenarioId).getCandidateMeals(
+      ctx.userId,
+      args.explicitDislikedFoods,
+      args.excludeMealKeys ?? []
+    );
     ctx.lastCandidateKeys = new Set(candidates.map((c) => c.key));
     return candidates.map((c) => ({ mealKey: c.key, title: c.title, kcal: c.kcal, tags: c.tags }));
   },
@@ -43,7 +46,7 @@ export const planningImpls = {
     let meal: { title: string; kcal: number } | undefined;
     if (args.mealKey) {
       assertValidMealKey(ctx, args.mealKey);
-      meal = await getRecipeByKey(args.mealKey);
+      meal = await getScenario(ctx.scenarioId).getRecipeByKey(ctx.userId, args.mealKey);
     }
     const existed = await prisma.dailyPlan.findUnique({
       where: { userId_date_type: { userId: ctx.userId, date: ctx.dateKey, type: args.type } },
@@ -59,7 +62,7 @@ export const planningImpls = {
         mealTitle: meal?.title ?? null,
         kcal: meal?.kcal ?? null,
         status: "PENDING",
-        expiresAt: endOfToday(),
+        expiresAt: ctx.dayEndsAt ?? endOfToday(),
       },
       update: {
         mealKey: args.mealKey ?? undefined,
@@ -88,10 +91,10 @@ export const planningImpls = {
     let meal: { title: string; kcal: number } | undefined;
     if (args.mealKey) {
       assertValidMealKey(ctx, args.mealKey);
-      meal = await getRecipeByKey(args.mealKey);
+      meal = await getScenario(ctx.scenarioId).getRecipeByKey(ctx.userId, args.mealKey);
     }
-    const plan = await prisma.dailyPlan.update({
-      where: { id: args.planId },
+    const updated = await prisma.dailyPlan.updateMany({
+      where: { id: args.planId, userId: ctx.userId },
       data: {
         mealKey: args.mealKey ?? undefined,
         mealTitle: meal?.title ?? undefined,
@@ -99,7 +102,10 @@ export const planningImpls = {
         status: args.status ?? undefined,
       },
     });
+    if (updated.count !== 1) throw new Error("plan_not_found_for_user");
+    const plan = await prisma.dailyPlan.findUniqueOrThrow({ where: { id: args.planId } });
     ctx.finalPlanId = plan.id;
+    ctx.planChanged = true;
     return { planId: plan.id, mealKey: plan.mealKey, mealTitle: plan.mealTitle, kcal: plan.kcal, status: plan.status };
   },
 };

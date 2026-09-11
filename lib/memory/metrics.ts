@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/db";
-import { getRecipesByKeys } from "@/lib/scenarios/weightloss/meals";
+import { getScenario } from "@/lib/scenarios/registry";
 
 /**
  * Memory-effectiveness metrics, computed read-only from the Tier3 episodic
@@ -57,13 +57,19 @@ export type RepeatMistakeStats = {
  * rejected again. High = memory exists but decisions ignore it.
  */
 export async function getRepeatMistakeStats(userId: string): Promise<RepeatMistakeStats> {
-  const events = await prisma.episodicLog.findMany({
-    where: { userId, eventType: { in: ["PLAN_GENERATED", "ACTION_SWAP"] }, mealKey: { not: null } },
-    orderBy: { createdAt: "asc" },
-    select: { eventType: true, mealKey: true, createdAt: true },
-  });
+  const [events, profile] = await Promise.all([
+    prisma.episodicLog.findMany({
+      where: { userId, eventType: { in: ["PLAN_GENERATED", "ACTION_SWAP"] }, mealKey: { not: null } },
+      orderBy: { createdAt: "asc" },
+      select: { eventType: true, mealKey: true, createdAt: true },
+    }),
+    prisma.userProfile.findUnique({ where: { userId }, select: { scenarioId: true } }),
+  ]);
 
-  const mealsByKey = await getRecipesByKeys(events.map((e) => e.mealKey!));
+  const mealsByKey = await getScenario(profile?.scenarioId).getRecipesByKeys(
+    userId,
+    events.map((e) => e.mealKey!)
+  );
 
   const rejectedKeys = new Set<string>();
   const rejectedTags = new Set<string>();

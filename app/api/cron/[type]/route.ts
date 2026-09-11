@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireCurrentUser } from "@/lib/user";
+import { getCurrentUser, getOnboardedUserById } from "@/lib/user";
 import { runMorning, runLunch, runEvening } from "@/lib/orchestrator/daily-orchestrator";
 
 export const dynamic = "force-dynamic";
@@ -16,10 +16,9 @@ const HANDLERS = {
 
 function isAuthorized(req: NextRequest): boolean {
   const secret = process.env.CRON_SECRET;
-  // No secret configured (local dev) -- allow through so `curl` testing works
-  // without extra setup. Vercel Cron always sends this header when a secret
-  // is configured, per https://vercel.com/docs/cron-jobs/manage-cron-jobs.
-  if (!secret) return true;
+  // Local development can use the signed-in user. Production admin calls
+  // require a secret; routine scheduling is handled by Inngest.
+  if (!secret) return process.env.NODE_ENV !== "production";
   return req.headers.get("authorization") === `Bearer ${secret}`;
 }
 
@@ -35,8 +34,14 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ type: strin
   }
 
   try {
-    const user = await requireCurrentUser();
-    const result = await handler(user);
+    const requestedUserId = req.nextUrl.searchParams.get("userId");
+    const user = requestedUserId
+      ? await getOnboardedUserById(requestedUserId)
+      : await getCurrentUser();
+    if (!user?.profile || !user.persona) {
+      return NextResponse.json({ ok: false, type, error: "Onboarded user not found" }, { status: 404 });
+    }
+    const result = await handler({ id: user.id, profile: user.profile, persona: user.persona });
     return NextResponse.json({ ok: true, type, result });
   } catch (err) {
     return NextResponse.json(

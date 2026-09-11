@@ -1,6 +1,6 @@
 # proactive-coach
 
-一个几乎没有"聊天界面"感觉的个人 Agent：你不用打开对话框，它会按早/午/晚三个时间点主动找你。减肥是演示场景，但这个项目真正要展示的是**一个 tool-using Agent 的深度**——有规划、有工具边界、有跨轮记忆、有可观测 Trace，而不是一个"定时任务 + 模板拼文案"的自动化脚本。
+一个几乎没有"聊天界面"感觉的多用户 Agent：它按每个用户的时区和提醒时间主动触发。减肥是首个静态 ScenarioPlugin；核心仍是有规划、工具边界、跨轮记忆和可观测 Trace 的 tool-using Agent。
 
 ## 核心设计
 
@@ -43,16 +43,19 @@
 - 幂等性按「今天这一轮的消息是否已发出」判断，不是按「计划是否已存在」——避免真实 LLM 调用一半失败（plan 建了、消息没发出）导致当天永久静默。
 - `stopWhen: stepCountIs(6)` 限制单轮步数；命中上限仍未产出消息时，发一条确定性兜底消息，而不是让用户当天什么都收不到。
 
-**单用户**：没有登录/多租户，`prisma.user.findFirst()` 即拿到唯一用户（见 [lib/user.ts](lib/user.ts)）。
+**身份与隔离**：Clerk session 映射到内部 `User.id`；Server Actions、Route Handlers 和数据工具在数据源附近校验身份/`userId`。平台菜品对所有用户只读，用户自建菜品按 `ownerId` 隔离。
+
+**异步调度**：Inngest 每 5 分钟按 IANA 时区计算 due users，再发送单用户事件。全局 Agent 并发为 5、单用户为 1，重试 3 次；事件 ID、Orchestrator 查询和 `Message.dedupeKey` 组成三层幂等。
 
 ## 本地开发
 
-数据库是 Postgres（生产和本地共用一个 Neon 实例，或自建一个）。先把 `.env.example` 复制为 `.env`，填入 `DATABASE_URL`（pooler 连接串，运行时用）和 `DIRECT_DATABASE_URL`（直连串，迁移用；Neon 上就是去掉 `-pooler` 的同一地址）。
+数据库是 Postgres。先把 `.env.example` 复制为 `.env`，配置数据库和 Clerk；不配置 Clerk 时仅在非生产环境保留旧的单用户开发兼容模式。
 
 ```bash
 npm install
 npm run db:migrate   # 首次运行，在数据库里建表
 npm run dev
+npm run dev:inngest  # 另一个终端，本地验证定时/事件任务
 ```
 
 打开 http://localhost:3000，第一次会跳转到 `/onboarding` 填写目标、忌口、语气偏好等。
@@ -80,10 +83,10 @@ DEEPSEEK_MODEL=deepseek-v4-pro   # 或 deepseek-v4-flash；旧别名 deepseek-ch
 
 ## 部署（Vercel）
 
-1. 推送到 GitHub，在 Vercel 导入这个仓库（代码已经是 Postgres 方言，不需要额外改造）。
-2. 建一个 Neon（或 Vercel Postgres）免费库，在 Vercel 项目环境变量里设置 `DATABASE_URL`（pooler 连接串）和 `DIRECT_DATABASE_URL`（直连串）。构建命令里的 `prisma migrate deploy` 会在每次部署时自动把未应用的迁移建进库里。
-3. 再设置 `CRON_SECRET`（任意随机字符串）、`DEEPSEEK_API_KEY`、`DEEPSEEK_MODEL`。设置 `CRON_SECRET` 后 Vercel Cron 会自动带上 `Authorization: Bearer $CRON_SECRET`，`/api/cron/[type]` 会校验这个值，避免接口被外部随意调用（同时首页的开发者面板在线上会因缺少密钥而失效，属于预期行为）。
-4. `vercel.json` 已经配置了三个 Cron（07:30 / 12:00 / 20:30 北京时间，换算成 UTC；Hobby 计划有 ±59 分钟的触发弹性），以及 `"regions": ["sin1"]` 把函数固定在新加坡、和 Neon 同区域——不配的话函数默认在美东，每次数据库查询多 200ms+ 跨洋往返。如果你在 onboarding 里改了提醒时间，需要同步手动改 cron 表达式——Vercel Cron 是部署时静态配置的，不会读数据库里的个性化时间。
+1. 配置数据库、Clerk、Inngest、DeepSeek 和可选 Sentry 环境变量。
+2. 运行 `npm run beta:preflight`；旧用户使用 `npm run bind:clerk-user -- <userId> <clerkId>` 做无损绑定。
+3. 先设置 `ASYNC_AGENT_ENABLED=false`、`ASYNC_AGENT_SHADOW=true` 部署，按 [Beta rollout runbook](docs/beta-rollout.md) 完成 shadow 验证后分批开放。
+4. `/api/cron/[type]` 仅保留为带 `CRON_SECRET` 的单用户恢复入口；生产日常调度全部由 Inngest 承担。
 
 ## 目录结构
 
@@ -94,21 +97,23 @@ app/
   meals/page.tsx         菜品知识库管理页（增/改/停用，停用不删行——历史计划靠 key 回查）
   onboarding/page.tsx    首次引导表单
   actions.ts             Server Actions（按钮点击、体重打卡、onboarding 提交）
-  api/cron/[type]/       Vercel Cron 调用的三个每日触发端点
+  api/inngest/           Inngest 注册与执行端点
+  api/cron/[type]/       受保护的管理员单用户恢复端点
   components/            今日卡用到的展示组件
 lib/
   agent/
     provider.ts          DeepSeek / mock provider 选择
     tools/                Agent 工具集（memory / planning / messaging）
-    prompts.ts            system prompt + 各 trigger 的 goal prompt
+    prompts.ts            场景 prompt 的兼容导出
     runner.ts             runAgentTurn / runActionTurn，多步工具循环 + Trace 落库
     trace.ts              AgentTrace 读写与 step 类型
   db.ts                  Prisma Client 单例（driver adapter 模式）
-  user.ts                单用户 helper
-  date.ts                日期 key 工具
+  inngest/               scheduler 与单用户 Agent worker
+  user.ts                Clerk session / 后台显式 userId 身份边界
+  date.ts                IANA 时区日期与触发窗口工具
   memory/                Tier 2 / Tier 3 记忆读写
   orchestrator/          Cron 触发入口、参与度计算、按钮状态机（confirm/complete/skip 走这里，不经 Agent）
-  scenarios/weightloss/  减肥场景的候选读取（meals.ts 查 Meal 表，按吃饭方式分自炊/食堂/外卖）与过滤逻辑（Agent 的工具数据源，唯一场景，未做插件抽象）
+  scenarios/             静态 ScenarioPlugin registry 与 weightloss 实现
 prisma/
   schema.prisma          数据模型（含 AgentTrace）
 ```
@@ -116,6 +121,6 @@ prisma/
 ## 明确不做的（避免又漂回产品向）
 
 - Web Push / 邮件通知
-- 多场景插件化（做饭、护肤等）
+- 第二个实际业务场景或动态插件市场
 - 自由长对话主界面
 - LangGraph / 更重的 multi-agent 编排——这个项目要展示的是对 Agent 架构本身的理解，不是框架封装能力

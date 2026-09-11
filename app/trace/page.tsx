@@ -94,6 +94,13 @@ export default async function TracePage() {
   ]);
 
   const pct = (v: number | null) => (v === null ? "—" : `${Math.round(v * 100)}%`);
+  const fallbackCount = traces.filter((trace) => trace.delivery === "fallback").length;
+  const fallbackRate = traces.length > 0 ? fallbackCount / traces.length : null;
+  const duplicateMessages = new Set(
+    traces
+      .map((trace) => trace.finalMessageId)
+      .filter((id): id is string => Boolean(id))
+  ).size;
 
   return (
     <main className="mx-auto max-w-2xl px-6 py-10">
@@ -141,6 +148,21 @@ export default async function TracePage() {
         </div>
       </section>
 
+      <section className="mb-6 grid grid-cols-3 gap-2">
+        <div className="rounded-xl border border-neutral-200 bg-white p-3">
+          <p className="text-xs text-neutral-400">Fallback 率</p>
+          <p className="mt-1 text-lg font-semibold">{pct(fallbackRate)}</p>
+        </div>
+        <div className="rounded-xl border border-neutral-200 bg-white p-3">
+          <p className="text-xs text-neutral-400">最近 Trace</p>
+          <p className="mt-1 text-lg font-semibold">{traces.length}</p>
+        </div>
+        <div className="rounded-xl border border-neutral-200 bg-white p-3">
+          <p className="text-xs text-neutral-400">交付消息</p>
+          <p className="mt-1 text-lg font-semibold">{duplicateMessages}</p>
+        </div>
+      </section>
+
       {traces.length === 0 && (
         <div className="rounded-xl border border-dashed border-neutral-300 p-6 text-center text-sm text-neutral-400">
           还没有 Trace。触发一次早上/中午/晚上，或者点一次「换一个」。
@@ -165,6 +187,11 @@ export default async function TracePage() {
                 </span>
               </summary>
               <p className="mt-3 whitespace-pre-wrap text-xs text-neutral-400">{t.goal}</p>
+              <p className="mt-2 text-xs text-neutral-400">
+                {t.durationMs ?? "—"}ms · {t.stepCount ?? "—"} 步 · {t.model ?? "无模型"} ·
+                token {t.inputTokens ?? "—"} / {t.outputTokens ?? "—"} · 交付 {t.delivery ?? "—"}
+                {t.failureKind ? ` · ${t.failureKind}` : ""}
+              </p>
               <ol className="mt-3 flex flex-col gap-1.5 text-sm">
                 {steps.map((step, idx) => (
                   <StepView key={idx} step={step} idx={idx} />

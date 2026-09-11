@@ -1,14 +1,20 @@
 import { generateText, stepCountIs } from "ai";
+import * as Sentry from "@sentry/nextjs";
 import { prisma } from "@/lib/db";
-import { getAgentMode, getModel } from "./provider";
+import { getAgentMode, getModel, getModelId } from "./provider";
 import { buildTools, createToolCtx, type ToolCtx } from "./tools";
 import { memoryImpls } from "./tools/memory";
 import { planningImpls } from "./tools/planning";
 import { messagingImpls } from "./tools/messaging";
-import { SYSTEM_PROMPT } from "./prompts";
 import { saveTrace, type TraceStep } from "./trace";
+import { getScenario } from "@/lib/scenarios/registry";
 
-const MAX_STEPS = 6;
+export const STEP_BUDGETS: Record<AgentTrigger | ActionTrigger, number> = {
+  morning: 6,
+  lunch: 6,
+  evening: 6,
+  swap: 6,
+};
 
 export type AgentTrigger = "morning" | "lunch" | "evening";
 export type ActionTrigger = "swap";
@@ -23,6 +29,7 @@ const TRIGGER_TO_MESSAGE_TYPE: Record<AgentTrigger, MessageType> = {
 
 export type AgentTurnResult = {
   status: "complete" | "incomplete" | "failed";
+  delivery: "agent" | "fallback" | "none";
   finalMessageId?: string;
   planId?: string;
   traceId: string;
@@ -49,8 +56,17 @@ export async function runAgentTurn(params: {
   explicitDislikedFoods: string[];
   /** planId to fall back to if the model never calls create/update_daily_plan (lunch/evening reuse an existing plan). */
   fallbackPlanId?: string;
+  dayEndsAt?: Date;
+  dedupeKey?: string;
+  scenarioId?: string;
 }): Promise<AgentTurnResult> {
-  const ctx = createToolCtx(params.userId, params.dateKey);
+  const startedAt = Date.now();
+  const ctx = createToolCtx(params.userId, params.dateKey, {
+    dayEndsAt: params.dayEndsAt,
+    messageDedupeKey: params.dedupeKey,
+    scenarioId: params.scenarioId,
+  });
+  const scenario = getScenario(params.scenarioId);
   if (params.fallbackPlanId) ctx.finalPlanId = params.fallbackPlanId;
   const mode = getAgentMode();
 
@@ -63,27 +79,23 @@ export async function runAgentTurn(params: {
     const tools = buildTools(ctx, { explicitDislikedFoods: params.explicitDislikedFoods });
     const result = await generateText({
       model: getModel(),
-      system: SYSTEM_PROMPT,
+      system: scenario.systemPrompt,
       prompt: params.goal,
       tools,
-      stopWhen: stepCountIs(MAX_STEPS),
+      stopWhen: stepCountIs(STEP_BUDGETS[params.trigger]),
     });
 
     collectStepsFromResult(result.steps, steps);
 
     let status: "complete" | "incomplete" = "complete";
+    let delivery: "agent" | "fallback" = "agent";
     if (!ctx.finalMessageId) {
       status = "incomplete";
-      const fallback = await messagingImpls.sendProactiveMessage(ctx, {
-        planId: ctx.finalPlanId,
-        type: TRIGGER_TO_MESSAGE_TYPE[params.trigger],
-        text: "抱歉，今天这一步我想得有点久，先给你一个简单的安排，稍后可以再手动调整。",
-        require: FALLBACK_REQUIRE[params.trigger],
-      });
-      steps.push({ type: "tool_call", toolName: "send_proactive_message", input: { fallback: true } });
-      steps.push({ type: "tool_result", toolName: "send_proactive_message", output: fallback });
+      delivery = "fallback";
+      await sendCronFallback(params, ctx, steps);
     }
 
+    const usage = result.usage as { inputTokens?: number; outputTokens?: number };
     const trace = await saveTrace({
       userId: params.userId,
       trigger: params.trigger,
@@ -93,11 +105,28 @@ export async function runAgentTurn(params: {
       steps,
       finalMessageId: ctx.finalMessageId,
       planId: ctx.finalPlanId,
+      durationMs: Date.now() - startedAt,
+      stepCount: result.steps.length,
+      model: getModelId(),
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      delivery,
     });
 
-    return { status, finalMessageId: ctx.finalMessageId, planId: ctx.finalPlanId, traceId: trace.id };
+    return { status, delivery, finalMessageId: ctx.finalMessageId, planId: ctx.finalPlanId, traceId: trace.id };
   } catch (err) {
+    Sentry.captureException(err, { tags: { trigger: params.trigger, layer: "agent-runner" }, user: { id: params.userId } });
     steps.push({ type: "error", message: err instanceof Error ? err.message : String(err) });
+    let delivery: "fallback" | "none" = "none";
+    try {
+      await sendCronFallback(params, ctx, steps);
+      delivery = "fallback";
+    } catch (fallbackError) {
+      steps.push({
+        type: "error",
+        message: `fallback_failed: ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`,
+      });
+    }
     const trace = await saveTrace({
       userId: params.userId,
       trigger: params.trigger,
@@ -107,8 +136,13 @@ export async function runAgentTurn(params: {
       steps,
       finalMessageId: ctx.finalMessageId,
       planId: ctx.finalPlanId,
+      durationMs: Date.now() - startedAt,
+      stepCount: steps.filter((step) => step.type === "tool_call").length,
+      model: getModelId(),
+      delivery,
+      failureKind: classifyFailure(err),
     });
-    return { status: "failed", finalMessageId: ctx.finalMessageId, planId: ctx.finalPlanId, traceId: trace.id };
+    return { status: "failed", delivery, finalMessageId: ctx.finalMessageId, planId: ctx.finalPlanId, traceId: trace.id };
   }
 }
 
@@ -126,8 +160,16 @@ export async function runActionTurn(params: {
   dateKey: string;
   explicitDislikedFoods: string[];
   planId: string;
+  previousMealKey: string;
+  dayEndsAt?: Date;
+  scenarioId?: string;
 }): Promise<AgentTurnResult> {
-  const ctx = createToolCtx(params.userId, params.dateKey);
+  const startedAt = Date.now();
+  const ctx = createToolCtx(params.userId, params.dateKey, {
+    dayEndsAt: params.dayEndsAt,
+    scenarioId: params.scenarioId,
+  });
+  const scenario = getScenario(params.scenarioId);
   ctx.finalPlanId = params.planId;
   const mode = getAgentMode();
 
@@ -140,20 +182,23 @@ export async function runActionTurn(params: {
     const tools = buildTools(ctx, { explicitDislikedFoods: params.explicitDislikedFoods });
     const result = await generateText({
       model: getModel(),
-      system: SYSTEM_PROMPT,
+      system: scenario.systemPrompt,
       prompt: params.goal,
       tools,
-      stopWhen: stepCountIs(MAX_STEPS),
+      stopWhen: stepCountIs(STEP_BUDGETS[params.trigger]),
     });
 
     collectStepsFromResult(result.steps, steps);
 
-    // Swap turns don't send a message; "complete" means the plan actually changed meal.
-    let status: "complete" | "incomplete" = "complete";
-    if (!ctx.finalPlanId) {
-      status = "incomplete";
-    }
+    // Swap turns don't send a message; complete means the persisted meal actually changed.
+    const persistedPlan = await prisma.dailyPlan.findUnique({
+      where: { id: params.planId },
+      select: { mealKey: true },
+    });
+    const status: "complete" | "incomplete" =
+      persistedPlan?.mealKey && persistedPlan.mealKey !== params.previousMealKey ? "complete" : "incomplete";
 
+    const usage = result.usage as { inputTokens?: number; outputTokens?: number };
     const trace = await saveTrace({
       userId: params.userId,
       trigger: params.trigger,
@@ -163,16 +208,24 @@ export async function runActionTurn(params: {
       steps,
       finalMessageId: ctx.finalMessageId,
       planId: ctx.finalPlanId,
+      durationMs: Date.now() - startedAt,
+      stepCount: result.steps.length,
+      model: getModelId(),
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      delivery: "none",
     });
 
     return {
       status,
+      delivery: "none",
       finalMessageId: ctx.finalMessageId,
       planId: ctx.finalPlanId,
       traceId: trace.id,
       preferenceSignalRecorded: ctx.recordedPreferenceSignal,
     };
   } catch (err) {
+    Sentry.captureException(err, { tags: { trigger: params.trigger, layer: "agent-runner" }, user: { id: params.userId } });
     steps.push({ type: "error", message: err instanceof Error ? err.message : String(err) });
     const trace = await saveTrace({
       userId: params.userId,
@@ -183,9 +236,15 @@ export async function runActionTurn(params: {
       steps,
       finalMessageId: ctx.finalMessageId,
       planId: ctx.finalPlanId,
+      durationMs: Date.now() - startedAt,
+      stepCount: steps.filter((step) => step.type === "tool_call").length,
+      model: getModelId(),
+      delivery: "none",
+      failureKind: classifyFailure(err),
     });
     return {
       status: "failed",
+      delivery: "none",
       finalMessageId: ctx.finalMessageId,
       planId: ctx.finalPlanId,
       traceId: trace.id,
@@ -213,7 +272,66 @@ export async function saveTrivialActionTrace(params: {
     status: "COMPLETE",
     steps: [{ type: "model_text", text: "未调用模型，由代码确定性写入。" }],
     planId: params.planId,
+    delivery: "deterministic",
+    durationMs: 0,
+    stepCount: 0,
+    model: "deterministic",
   });
+}
+
+async function sendCronFallback(
+  params: {
+    userId: string;
+    trigger: AgentTrigger;
+    dateKey: string;
+    explicitDislikedFoods: string[];
+  },
+  ctx: ToolCtx,
+  steps: TraceStep[]
+) {
+  if (ctx.finalMessageId) return;
+
+  if (params.trigger === "morning" && !ctx.finalPlanId) {
+    const candidates = await planningImpls.listCandidateMeals(ctx, {
+      explicitDislikedFoods: params.explicitDislikedFoods,
+    });
+    const chosen = candidates[0];
+    if (!chosen) throw new Error("fallback_no_candidate_meal");
+    steps.push({ type: "tool_call", toolName: "list_candidate_meals", input: { fallback: true } });
+    steps.push({ type: "tool_result", toolName: "list_candidate_meals", output: candidates });
+
+    const plan = await planningImpls.createDailyPlan(ctx, {
+      type: "MORNING",
+      mealKey: chosen.mealKey,
+    });
+    steps.push({ type: "tool_call", toolName: "create_daily_plan", input: { fallback: true, mealKey: chosen.mealKey } });
+    steps.push({ type: "tool_result", toolName: "create_daily_plan", output: plan });
+  }
+
+  if (!ctx.finalPlanId) throw new Error("fallback_missing_plan");
+
+  const textByTrigger: Record<AgentTrigger, string> = {
+    morning: "今天先给你一个稳妥的午饭安排，确认后照着执行；不合适也可以换一个。",
+    lunch: "中午提醒：按早上的计划吃，完成后记得回来打个勾；临时有变化也可以跳过。",
+    evening: "辛苦一天了，方便的话记录一下今天的体重，我们明天继续调整。",
+  };
+  const fallback = await messagingImpls.sendProactiveMessage(ctx, {
+    planId: ctx.finalPlanId,
+    type: TRIGGER_TO_MESSAGE_TYPE[params.trigger],
+    text: textByTrigger[params.trigger],
+    require: FALLBACK_REQUIRE[params.trigger],
+    payload: { fallback: true },
+  });
+  steps.push({ type: "tool_call", toolName: "send_proactive_message", input: { fallback: true } });
+  steps.push({ type: "tool_result", toolName: "send_proactive_message", output: fallback });
+}
+
+function classifyFailure(error: unknown) {
+  const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  if (/timeout|timed out|abort/i.test(message)) return "model_timeout";
+  if (/invalid_meal_key|plan_not_found|tool/i.test(message)) return "tool_error";
+  if (/fallback_/i.test(message)) return "fallback_error";
+  return "model_or_provider_error";
 }
 
 function collectStepsFromResult(
@@ -287,12 +405,30 @@ async function runMockCronTurn(
     steps,
     finalMessageId: ctx.finalMessageId,
     planId: ctx.finalPlanId,
+    stepCount: steps.filter((step) => step.type === "tool_call").length,
+    delivery: "agent",
+    durationMs: 0,
+    model: "mock",
   });
-  return { status: "complete", finalMessageId: ctx.finalMessageId, planId: ctx.finalPlanId, traceId: trace.id };
+  return {
+    status: "complete",
+    delivery: "agent",
+    finalMessageId: ctx.finalMessageId,
+    planId: ctx.finalPlanId,
+    traceId: trace.id,
+  };
 }
 
 async function runMockSwapTurn(
-  params: { userId: string; trigger: ActionTrigger; goal: string; dateKey: string; explicitDislikedFoods: string[]; planId: string },
+  params: {
+    userId: string;
+    trigger: ActionTrigger;
+    goal: string;
+    dateKey: string;
+    explicitDislikedFoods: string[];
+    planId: string;
+    previousMealKey: string;
+  },
   ctx: ToolCtx
 ): Promise<AgentTurnResult> {
   const steps: TraceStep[] = [
@@ -318,18 +454,24 @@ async function runMockSwapTurn(
     );
   }
 
+  const status = chosen?.mealKey && chosen.mealKey !== params.previousMealKey ? "complete" : "incomplete";
   const trace = await saveTrace({
     userId: params.userId,
     trigger: params.trigger,
     goal: params.goal,
     source: "MOCK",
-    status: "COMPLETE",
+    status: status === "complete" ? "COMPLETE" : "INCOMPLETE",
     steps,
     finalMessageId: ctx.finalMessageId,
     planId: ctx.finalPlanId,
+    stepCount: steps.filter((step) => step.type === "tool_call").length,
+    delivery: "none",
+    durationMs: 0,
+    model: "mock",
   });
   return {
-    status: "complete",
+    status,
+    delivery: "none",
     finalMessageId: ctx.finalMessageId,
     planId: ctx.finalPlanId,
     traceId: trace.id,

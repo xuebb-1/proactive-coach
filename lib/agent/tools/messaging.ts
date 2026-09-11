@@ -15,19 +15,37 @@ export const messagingImpls = {
       payload?: Record<string, unknown>;
     }
   ) {
-    const message = await prisma.message.create({
-      data: {
-        userId: ctx.userId,
-        planId: args.planId ?? ctx.finalPlanId ?? null,
-        type: args.type,
-        text: args.text,
-        require: args.require,
-        payload: JSON.stringify(args.payload ?? {}),
-        expiresAt: endOfToday(),
-      },
-    });
+    if (ctx.messageDedupeKey) {
+      const existing = await prisma.message.findUnique({ where: { dedupeKey: ctx.messageDedupeKey } });
+      if (existing) {
+        ctx.finalMessageId = existing.id;
+        return { messageId: existing.id, deduplicated: true };
+      }
+    }
+
+    let message;
+    try {
+      message = await prisma.message.create({
+        data: {
+          userId: ctx.userId,
+          planId: args.planId ?? ctx.finalPlanId ?? null,
+          type: args.type,
+          text: args.text,
+          require: args.require,
+          payload: JSON.stringify(args.payload ?? {}),
+          expiresAt: ctx.dayEndsAt ?? endOfToday(),
+          dedupeKey: ctx.messageDedupeKey,
+        },
+      });
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+      if (code !== "P2002" || !ctx.messageDedupeKey) throw error;
+      const existing = await prisma.message.findUnique({ where: { dedupeKey: ctx.messageDedupeKey } });
+      if (!existing) throw error;
+      message = existing;
+    }
     ctx.finalMessageId = message.id;
-    return { messageId: message.id };
+    return { messageId: message.id, deduplicated: message.dedupeKey === ctx.messageDedupeKey };
   },
 
   async askUser(
@@ -49,7 +67,7 @@ export const messagingImpls = {
         text: args.question,
         require: "ASK_USER",
         payload: JSON.stringify({ question: args.question, options: args.options, ...(args.extraPayload ?? {}) }),
-        expiresAt: endOfToday(),
+        expiresAt: ctx.dayEndsAt ?? endOfToday(),
       },
     });
     ctx.finalMessageId = message.id;

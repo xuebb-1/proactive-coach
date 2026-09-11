@@ -1,27 +1,55 @@
-/**
- * All "which calendar day is it" logic is pinned to Asia/Shanghai (UTC+8, no
- * DST), NOT the server's local timezone. On Vercel the server runs in UTC,
- * and the morning cron fires at 23:30 UTC (= 07:30 Beijing next day) -- using
- * server-local dates there would file the plan under yesterday's date and
- * orphan it. Never use `new Date().setHours(...)` / date-fns `format` for
- * day-key math in this codebase; go through these helpers.
- */
-const TZ_OFFSET_MS = 8 * 60 * 60 * 1000;
+import { formatInTimeZone, fromZonedTime } from "date-fns-tz";
+
+export const DEFAULT_TIME_ZONE = "Asia/Shanghai";
+
+export function normalizeTimeZone(timeZone?: string | null) {
+  const candidate = timeZone || DEFAULT_TIME_ZONE;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: candidate }).format();
+    return candidate;
+  } catch {
+    return DEFAULT_TIME_ZONE;
+  }
+}
+
+export function todayKeyForTimeZone(timeZone: string, d: Date = new Date()): string {
+  return formatInTimeZone(d, normalizeTimeZone(timeZone), "yyyy-MM-dd");
+}
 
 /** Beijing-time calendar day key, e.g. "2026-08-17". Used as the DailyPlan/CheckIn date column. */
 export function todayKey(d: Date = new Date()): string {
-  return new Date(d.getTime() + TZ_OFFSET_MS).toISOString().slice(0, 10);
+  return todayKeyForTimeZone(DEFAULT_TIME_ZONE, d);
+}
+
+export function endOfDayForTimeZone(timeZone: string, d: Date = new Date()): Date {
+  const zone = normalizeTimeZone(timeZone);
+  const dateKey = todayKeyForTimeZone(zone, d);
+  return fromZonedTime(`${dateKey}T23:59:59.999`, zone);
+}
+
+export function startOfDayForTimeZone(timeZone: string, d: Date = new Date()): Date {
+  const zone = normalizeTimeZone(timeZone);
+  return fromZonedTime(`${todayKeyForTimeZone(zone, d)}T00:00:00.000`, zone);
 }
 
 /** Last millisecond of the current Beijing-time day, as an absolute Date. */
 export function endOfToday(d: Date = new Date()): Date {
-  const shifted = new Date(d.getTime() + TZ_OFFSET_MS);
-  const startOfTomorrowShifted = Date.UTC(
-    shifted.getUTCFullYear(),
-    shifted.getUTCMonth(),
-    shifted.getUTCDate() + 1
-  );
-  return new Date(startOfTomorrowShifted - TZ_OFFSET_MS - 1);
+  return endOfDayForTimeZone(DEFAULT_TIME_ZONE, d);
+}
+
+export function isDueAt(
+  now: Date,
+  timeZone: string,
+  scheduledTime: string,
+  windowMinutes = 5
+): boolean {
+  const local = formatInTimeZone(now, normalizeTimeZone(timeZone), "HH:mm");
+  const [hour, minute] = local.split(":").map(Number);
+  const [scheduledHour, scheduledMinute] = scheduledTime.split(":").map(Number);
+  if (![hour, minute, scheduledHour, scheduledMinute].every(Number.isFinite)) return false;
+  const current = hour * 60 + minute;
+  const scheduled = scheduledHour * 60 + scheduledMinute;
+  return current >= scheduled && current < scheduled + windowMinutes;
 }
 
 export function daysBetween(a: Date, b: Date): number {

@@ -3,7 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { prisma } from "@/lib/db";
-import { requireCurrentUser } from "@/lib/user";
+import { getOrCreateCurrentUser, requireCurrentUser } from "@/lib/user";
 import { respondToMessage, respondToAskUser, submitCheckin, type ButtonAction } from "@/lib/orchestrator/actions";
 
 export async function respondToMessageAction(formData: FormData) {
@@ -35,10 +35,9 @@ export async function submitCheckinAction(formData: FormData) {
 }
 
 export async function createOnboardingAction(formData: FormData) {
-  const existing = await prisma.user.findFirst();
-  if (existing) {
-    redirect("/");
-  }
+  const user = await getOrCreateCurrentUser();
+  const existingProfile = await prisma.userProfile.findUnique({ where: { userId: user.id } });
+  if (existingProfile) redirect("/");
 
   const goalWeightKg = Number(formData.get("goalWeightKg"));
   const currentWeightKg = Number(formData.get("currentWeightKg"));
@@ -48,6 +47,14 @@ export async function createOnboardingAction(formData: FormData) {
   const morningTime = String(formData.get("morningTime") || "07:30");
   const lunchTime = String(formData.get("lunchTime") || "12:00");
   const eveningTime = String(formData.get("eveningTime") || "20:30");
+  const timezoneRaw = String(formData.get("timezone") || "Asia/Shanghai");
+  let timezone = "Asia/Shanghai";
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: timezoneRaw }).format();
+    timezone = timezoneRaw;
+  } catch {
+    timezone = "Asia/Shanghai";
+  }
   const tonePreference = String(formData.get("tonePreference") || "gentle");
   const motivationHook = String(formData.get("motivationHook") || "health");
   const eventLabel = String(formData.get("eventLabel") || "").trim();
@@ -58,31 +65,34 @@ export async function createOnboardingAction(formData: FormData) {
     .map((s) => s.trim())
     .filter(Boolean);
 
-  const user = await prisma.user.create({
-    data: {
-      profile: {
-        create: {
-          goalWeightKg,
-          currentWeightKg,
-          dislikedFoods: JSON.stringify(dislikedFoods),
-          eatingMode,
-          morningTime,
-          lunchTime,
-          eveningTime,
-        },
+  await prisma.$transaction([
+    prisma.userProfile.upsert({
+      where: { userId: user.id },
+      create: {
+        userId: user.id,
+        goalWeightKg,
+        currentWeightKg,
+        dislikedFoods: JSON.stringify(dislikedFoods),
+        eatingMode,
+        morningTime,
+        lunchTime,
+        eveningTime,
+        timezone,
       },
-      persona: {
-        create: {
-          tonePreference,
-          motivationHook,
-          eventLabel: motivationHook === "event" && eventLabel ? eventLabel : null,
-          eventDate: motivationHook === "event" && eventDateRaw ? new Date(eventDateRaw) : null,
-        },
+      update: {},
+    }),
+    prisma.personaProfile.upsert({
+      where: { userId: user.id },
+      create: {
+        userId: user.id,
+        tonePreference,
+        motivationHook,
+        eventLabel: motivationHook === "event" && eventLabel ? eventLabel : null,
+        eventDate: motivationHook === "event" && eventDateRaw ? new Date(eventDateRaw) : null,
       },
-    },
-  });
-
-  void user;
+      update: {},
+    }),
+  ]);
   revalidatePath("/");
   redirect("/");
 }
@@ -109,22 +119,27 @@ function parseMealForm(formData: FormData) {
 }
 
 export async function createMealAction(formData: FormData) {
+  const user = await requireCurrentUser();
   const data = parseMealForm(formData);
   const key = `user_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-  await prisma.meal.create({ data: { key, source: "user", ...data } });
+  await prisma.meal.create({ data: { key, source: "user", ownerId: user.id, ...data } });
   revalidatePath("/meals");
 }
 
 export async function updateMealAction(formData: FormData) {
+  const user = await requireCurrentUser();
   const id = String(formData.get("id"));
   const data = parseMealForm(formData);
-  await prisma.meal.update({ where: { id }, data });
+  const result = await prisma.meal.updateMany({ where: { id, ownerId: user.id, source: "user" }, data });
+  if (result.count !== 1) throw new Error("Meal not found or not editable");
   revalidatePath("/meals");
 }
 
 export async function toggleMealAction(formData: FormData) {
+  const user = await requireCurrentUser();
   const id = String(formData.get("id"));
-  const meal = await prisma.meal.findUniqueOrThrow({ where: { id }, select: { isActive: true } });
-  await prisma.meal.update({ where: { id }, data: { isActive: !meal.isActive } });
+  const meal = await prisma.meal.findFirst({ where: { id, ownerId: user.id, source: "user" }, select: { isActive: true } });
+  if (!meal) throw new Error("Meal not found or not editable");
+  await prisma.meal.updateMany({ where: { id, ownerId: user.id }, data: { isActive: !meal.isActive } });
   revalidatePath("/meals");
 }

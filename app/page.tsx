@@ -1,8 +1,9 @@
 import Link from "next/link";
+import { UserButton } from "@clerk/nextjs";
 import { redirect } from "next/navigation";
 import { prisma } from "@/lib/db";
 import { getCurrentUser } from "@/lib/user";
-import { todayKey } from "@/lib/date";
+import { todayKeyForTimeZone } from "@/lib/date";
 import { MessageCard } from "@/app/components/MessageCard";
 import { DevTriggerPanel } from "@/app/components/DevTriggerPanel";
 
@@ -20,7 +21,7 @@ export default async function TodayPage() {
     redirect("/onboarding");
   }
 
-  const dateKey = todayKey();
+  const dateKey = todayKeyForTimeZone(user.profile.timezone);
 
   const morningPlan = await prisma.dailyPlan.findUnique({
     where: { userId_date_type: { userId: user.id, date: dateKey, type: "MORNING" } },
@@ -92,6 +93,7 @@ export default async function TodayPage() {
           <Link href="/trace" className="text-sm text-neutral-500 underline-offset-2 hover:text-neutral-900 hover:underline">
             Trace →
           </Link>
+          {process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY && <UserButton />}
         </div>
       </header>
 
@@ -150,7 +152,7 @@ export default async function TodayPage() {
         </section>
       )}
 
-      <DevTriggerPanel />
+      {process.env.NODE_ENV === "development" && <DevTriggerPanel />}
     </main>
   );
 }
