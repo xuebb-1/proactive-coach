@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { prisma } from "@/lib/db";
+import { requireOwnerSession } from "@/lib/auth";
 import { createMealAction, updateMealAction, toggleMealAction } from "@/app/actions";
 
 export const dynamic = "force-dynamic";
@@ -66,6 +67,7 @@ function MealForm({
 }
 
 export default async function MealsPage() {
+  await requireOwnerSession();
   const meals = await prisma.meal.findMany({
     orderBy: [{ mode: "asc" }, { isActive: "desc" }, { createdAt: "asc" }],
   });

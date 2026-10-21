@@ -1,5 +1,6 @@
 import { createOnboardingAction } from "@/app/actions";
 import { prisma } from "@/lib/db";
+import { requireOwnerSession } from "@/lib/auth";
 import { redirect } from "next/navigation";
 
 // Must check the DB per-request (not at build time) to decide whether to
@@ -7,6 +8,7 @@ import { redirect } from "next/navigation";
 export const dynamic = "force-dynamic";
 
 export default async function OnboardingPage() {
+  await requireOwnerSession();
   const existing = await prisma.user.findFirst();
   if (existing) redirect("/");
 

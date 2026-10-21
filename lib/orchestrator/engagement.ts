@@ -1,36 +1,29 @@
 import { prisma } from "@/lib/db";
+import { todayKey } from "@/lib/date";
 
 export type EngagementTrend = "up" | "stable" | "down";
 
-const POSITIVE_STATUSES = new Set(["CONFIRMED", "SWAPPED", "COMPLETED"]);
-
-async function completionRate(userId: string, fromDaysAgo: number, toDaysAgo: number) {
-  const from = new Date(Date.now() - fromDaysAgo * 24 * 60 * 60 * 1000);
-  const to = new Date(Date.now() - toDaysAgo * 24 * 60 * 60 * 1000);
-  const plans = await prisma.dailyPlan.findMany({
-    where: { userId, type: "MORNING", createdAt: { gte: from, lt: to } },
-    select: { status: true },
-  });
-  if (plans.length === 0) return null;
-  const positive = plans.filter((p) => POSITIVE_STATUSES.has(p.status)).length;
-  return positive / plans.length;
+async function participationRate(userId: string, fromDaysAgo: number, toDaysAgo: number) {
+  const from = new Date(Date.now() - fromDaysAgo * 86400000);
+  const to = new Date(Date.now() - toDaysAgo * 86400000);
+  const [plans, events] = await Promise.all([
+    prisma.dailyPlan.findMany({
+      where: { userId, type: "MORNING", createdAt: { gte: from, lt: to } }, select: { date: true },
+    }),
+    prisma.episodicLog.findMany({
+      where: { userId, planType: "MORNING", createdAt: { gte: from, lt: to }, eventType: { in: ["ACTION_CONFIRM", "ACTION_SWAP", "ACTION_COMPLETE"] } },
+      select: { createdAt: true },
+    }),
+  ]);
+  if (!plans.length) return null;
+  const engagedDays = new Set(events.map((event) => todayKey(event.createdAt)));
+  return plans.filter((plan) => engagedDays.has(plan.date)).length / plans.length;
 }
 
-/**
- * Deliberately simple for v1 -- a 7-day-vs-previous-7-day completion rate
- * comparison, not a learned model. This is the "state trigger" from the plan:
- * it softens tone when engagement drops, per the Noom-style finding that
- * disengaging users need a gentler nudge, not more pressure.
- */
 export async function getEngagementTrend(userId: string): Promise<EngagementTrend> {
-  const recent = await completionRate(userId, 7, 0);
-  const previous = await completionRate(userId, 14, 7);
-
-  if (recent === null) return "stable";
-  if (previous === null) return "stable";
-
+  const recent = await participationRate(userId, 7, 0);
+  const previous = await participationRate(userId, 14, 7);
+  if (recent === null || previous === null) return "stable";
   const delta = recent - previous;
-  if (delta <= -0.2) return "down";
-  if (delta >= 0.2) return "up";
-  return "stable";
+  return delta <= -0.2 ? "down" : delta >= 0.2 ? "up" : "stable";
 }

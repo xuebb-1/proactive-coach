@@ -2,7 +2,7 @@ import { z } from "zod";
 import { tool } from "ai";
 import { prisma } from "@/lib/db";
 import { searchPreferences, recordPreferenceSignal } from "@/lib/memory/preference";
-import { getRecentEpisodes, logEvent } from "@/lib/memory/episodic";
+import { getRecentEpisodes } from "@/lib/memory/episodic";
 import { getEngagementTrend } from "@/lib/orchestrator/engagement";
 import { daysBetween } from "@/lib/date";
 import type { ToolCtx } from "./context";
@@ -65,22 +65,16 @@ export const memoryImpls = {
   },
 
   async recordPreferenceSignal(ctx: ToolCtx, args: { mealKey: string; signal: "dislike" | "like" }) {
+    if (ctx.trigger !== "swap" || args.signal !== "dislike" || args.mealKey !== ctx.swapMealKey) {
+      throw new Error("本轮只能记录被换掉餐食的一次负反馈。");
+    }
+    const plan = await prisma.dailyPlan.findUnique({ where: { id: ctx.finalPlanId, userId: ctx.userId } });
+    if (!plan?.mealKey || plan.mealKey === ctx.swapMealKey) throw new Error("换菜成功后才能记录负反馈。");
     await recordPreferenceSignal(ctx.userId, args.mealKey, args.signal);
     ctx.recordedPreferenceSignal = true;
     return { ok: true, mealKey: args.mealKey, signal: args.signal };
   },
 
-  async logEpisode(
-    ctx: ToolCtx,
-    args: {
-      eventType: "PLAN_GENERATED" | "ACTION_CONFIRM" | "ACTION_SWAP" | "ACTION_COMPLETE" | "ACTION_SKIP" | "AUTO_ACCEPTED";
-      mealKey?: string;
-      metadata?: Record<string, unknown>;
-    }
-  ) {
-    await logEvent({ userId: ctx.userId, eventType: args.eventType, mealKey: args.mealKey, metadata: args.metadata });
-    return { ok: true };
-  },
 };
 
 export function buildMemoryTools(ctx: ToolCtx) {
@@ -125,29 +119,11 @@ export function buildMemoryTools(ctx: ToolCtx) {
     execute: async (args) => memoryImpls.recordPreferenceSignal(ctx, args),
   });
 
-  const log_episode = tool({
-    description: "写入 Tier3 事件日志（追加，不可覆盖）。仅用于记录本轮已发生的、非计划/消息类的辅助事件。",
-    inputSchema: z.object({
-      eventType: z.enum([
-        "PLAN_GENERATED",
-        "ACTION_CONFIRM",
-        "ACTION_SWAP",
-        "ACTION_COMPLETE",
-        "ACTION_SKIP",
-        "AUTO_ACCEPTED",
-      ]),
-      mealKey: z.string().optional(),
-      metadata: z.record(z.string(), z.unknown()).optional(),
-    }),
-    execute: async (args) => memoryImpls.logEpisode(ctx, args),
-  });
-
   return {
     get_user_profile,
     search_preferences,
     get_recent_episodes,
     get_engagement_trend,
     record_preference_signal,
-    log_episode,
   };
 }

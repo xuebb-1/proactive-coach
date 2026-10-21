@@ -5,6 +5,7 @@ import { getCurrentUser } from "@/lib/user";
 import { todayKey } from "@/lib/date";
 import { MessageCard } from "@/app/components/MessageCard";
 import { DevTriggerPanel } from "@/app/components/DevTriggerPanel";
+import { logoutAction } from "@/app/login/actions";
 
 // Must be evaluated per-request, not baked in at build time -- this page
 // reflects live DB state (today's messages, plan status) that changes
@@ -33,18 +34,14 @@ export default async function TodayPage() {
   // must not hijack the morning slot. Ordered by createdAt so the result is
   // deterministic if a slot ever ends up with more than one message.
   const [morningMessage, lunchMessage, eveningMessage, askUserMessages] = await Promise.all([
-    morningPlan
-      ? prisma.message.findFirst({
-          where: { planId: morningPlan.id, type: "MORNING", require: { not: "ASK_USER" } },
-          orderBy: { createdAt: "asc" },
-        })
-      : null,
-    morningPlan
-      ? prisma.message.findFirst({
-          where: { planId: morningPlan.id, type: "LUNCH", require: { not: "ASK_USER" } },
-          orderBy: { createdAt: "asc" },
-        })
-      : null,
+    prisma.message.findFirst({
+      where: { userId: user.id, deliveryKey: `${user.id}:${dateKey}:MORNING`, require: { not: "ASK_USER" } },
+      orderBy: { createdAt: "asc" },
+    }),
+    prisma.message.findFirst({
+      where: { userId: user.id, deliveryKey: `${user.id}:${dateKey}:LUNCH`, require: { not: "ASK_USER" } },
+      orderBy: { createdAt: "asc" },
+    }),
     eveningPlan
       ? prisma.message.findFirst({
           where: { planId: eveningPlan.id, type: "EVENING", require: { not: "ASK_USER" } },
@@ -92,6 +89,7 @@ export default async function TodayPage() {
           <Link href="/trace" className="text-sm text-neutral-500 underline-offset-2 hover:text-neutral-900 hover:underline">
             Trace →
           </Link>
+          <form action={logoutAction}><button className="text-sm text-neutral-500">退出</button></form>
         </div>
       </header>
 
@@ -100,15 +98,15 @@ export default async function TodayPage() {
           <MessageCard key={m.id} message={m} plan={null} />
         ))}
         {morningMessage && (
-          <MessageCard message={morningMessage} plan={morningPlan ? { status: morningPlan.status } : null} />
+          <MessageCard message={morningMessage} plan={morningPlan} />
         )}
         {lunchMessage && (
-          <MessageCard message={lunchMessage} plan={morningPlan ? { status: morningPlan.status } : null} />
+          <MessageCard message={lunchMessage} plan={morningPlan} />
         )}
         {eveningMessage && (
           <MessageCard
             message={eveningMessage}
-            plan={eveningPlan ? { status: eveningPlan.status } : null}
+            plan={eveningPlan}
             todaysWeightKg={todaysCheckin?.weightKg ?? null}
           />
         )}
@@ -150,7 +148,7 @@ export default async function TodayPage() {
         </section>
       )}
 
-      <DevTriggerPanel />
+      {process.env.NODE_ENV !== "production" && <DevTriggerPanel />}
     </main>
   );
 }

@@ -86,6 +86,7 @@ enum PlanStatus {
   SKIPPED
   AUTO_ACCEPTED
   EXPIRED
+  NO_RESPONSE
 }
 
 // One row per (user, date, type) -- the day's draft plan / checkpoint.
@@ -118,6 +119,7 @@ enum MessageRequire {
 // The single proactive Feed: outbound messages + the user's short structured reply.
 model Message {
   id             String         @id @default(cuid())
+  deliveryKey    String?        @unique
   userId         String
   user           User           @relation(fields: [userId], references: [id])
   planId         String?
@@ -135,6 +137,7 @@ model Message {
 // Tier 3 memory: append-only raw event log. Never mutated; used to derive
 // PreferenceMemory and to compute engagement trend.
 enum EpisodicEventType {
+  PLAN_NO_RESPONSE
   PLAN_GENERATED
   ACTION_CONFIRM
   ACTION_SWAP
@@ -147,6 +150,7 @@ enum EpisodicEventType {
 
 model EpisodicLog {
   id        String            @id @default(cuid())
+  eventKey  String?           @unique
   userId    String
   user      User              @relation(fields: [userId], references: [id])
   eventType EpisodicEventType
@@ -164,6 +168,8 @@ model CheckIn {
   weightKg   Float?
   difficulty Int? // 1-5 subjective difficulty, optional
   createdAt  DateTime @default(now())
+
+  @@unique([userId, date])
 }
 
 // Tier 2 memory: distilled, confidence-weighted preferences. MVP writes are
@@ -178,10 +184,22 @@ model PreferenceMemory {
   source          String // "button_action" | "free_text_llm" | "onboarding"
   evidenceCount   Int      @default(1)
   lastConfirmedAt DateTime @default(now())
+  lastDecayedAt   DateTime?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
   @@unique([userId, key])
+}
+
+model OperationLease {
+  key       String   @id
+  token     String
+  expiresAt DateTime
+}
+
+model PreferenceEvidence {
+  key       String   @id
+  createdAt DateTime @default(now())
 }
 
 enum AgentTraceSource {
