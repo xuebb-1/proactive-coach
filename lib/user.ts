@@ -1,11 +1,18 @@
 import { prisma } from "@/lib/db";
+import { requireOwnerSession } from "@/lib/auth";
 
 /**
- * v1 is a single-user personal project: no auth, no multi-tenant concerns.
+ * Single-owner application: browser access requires an owner session.
  * There is at most one User row. This helper centralizes that assumption so
  * it's a one-line change later if multi-user support is ever needed.
  */
 export async function getCurrentUser() {
+  await requireOwnerSession();
+  return getScheduledUser();
+}
+
+/** Scheduler-only data access. The route must authenticate CRON_SECRET first. */
+export async function getScheduledUser() {
   return prisma.user.findFirst({
     include: { profile: true, persona: true },
   });

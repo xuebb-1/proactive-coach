@@ -52,9 +52,9 @@ export function buildLunchGoal(params: {
 export function buildEveningGoal(params: {
   dateKey: string;
   eveningPlanId: string;
-  morningOutcome: "COMPLETED" | "SKIPPED" | "AUTO_ACCEPTED" | "OTHER";
+  morningOutcome: "COMPLETED" | "SKIPPED" | "NO_RESPONSE" | "OTHER";
 }): string {
-  return `今天是 ${params.dateKey}，晚上 20:30 的触发，今日复盘 + 请求体重打卡。今天早上计划的最终结果是：${params.morningOutcome}（COMPLETED=完成，SKIPPED=跳过，AUTO_ACCEPTED=未回复已按计划自动执行，OTHER=当天没有计划）。
+  return `今天是 ${params.dateKey}，晚上 20:30 的触发，今日复盘 + 请求体重打卡。今天早上计划的最终结果是：${params.morningOutcome}（COMPLETED=完成，SKIPPED=跳过，NO_RESPONSE=未反馈，不能推断已经执行，OTHER=当天没有计划）。
 
 请依次：
 1. 调用 get_engagement_trend 和 get_recent_episodes（近几天的模式，比如是否连续跳过）；

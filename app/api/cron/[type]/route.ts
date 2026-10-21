@@ -1,47 +1,33 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireCurrentUser } from "@/lib/user";
+import { getScheduledUser } from "@/lib/user";
+import { OperationBusyError } from "@/lib/operations";
 import { runMorning, runLunch, runEvening } from "@/lib/orchestrator/daily-orchestrator";
 
 export const dynamic = "force-dynamic";
-// Real Agent turns take 15-80s (measured); Vercel's default function timeout
-// would kill them mid-turn. 300s requires Fluid Compute (default on new
-// projects) -- without it the platform clamps to the plan's max.
 export const maxDuration = 300;
-
-const HANDLERS = {
-  morning: runMorning,
-  lunch: runLunch,
-  evening: runEvening,
-} as const;
-
-function isAuthorized(req: NextRequest): boolean {
-  const secret = process.env.CRON_SECRET;
-  // No secret configured (local dev) -- allow through so `curl` testing works
-  // without extra setup. Vercel Cron always sends this header when a secret
-  // is configured, per https://vercel.com/docs/cron-jobs/manage-cron-jobs.
-  if (!secret) return true;
-  return req.headers.get("authorization") === `Bearer ${secret}`;
-}
+const HANDLERS = { morning: runMorning, lunch: runLunch, evening: runEvening } as const;
 
 export async function GET(req: NextRequest, ctx: { params: Promise<{ type: string }> }) {
-  if (!isAuthorized(req)) {
-    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  const secret = process.env.CRON_SECRET;
+  if (!secret && (process.env.NODE_ENV === "production" || process.env.VERCEL)) {
+    return NextResponse.json({ ok: false, error: "scheduler_not_configured" }, { status: 503 });
   }
-
+  if (secret && req.headers.get("authorization") !== `Bearer ${secret}`) {
+    return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  }
   const { type } = await ctx.params;
-  const handler = HANDLERS[type as keyof typeof HANDLERS];
-  if (!handler) {
-    return NextResponse.json({ error: `unknown trigger type: ${type}` }, { status: 400 });
-  }
-
+  if (!Object.hasOwn(HANDLERS, type)) return NextResponse.json({ ok: false, error: "unknown_trigger" }, { status: 400 });
   try {
-    const user = await requireCurrentUser();
-    const result = await handler(user);
-    return NextResponse.json({ ok: true, type, result });
-  } catch (err) {
-    return NextResponse.json(
-      { ok: false, type, error: err instanceof Error ? err.message : String(err) },
-      { status: 500 }
+    const user = await getScheduledUser();
+    if (!user?.profile || !user.persona) return NextResponse.json({ ok: false, error: "onboarding_required" }, { status: 409 });
+    const result = await HANDLERS[type as keyof typeof HANDLERS]({ ...user, profile: user.profile, persona: user.persona });
+    const failed = "status" in result && result.status === "failed";
+    return NextResponse.json({ ok: !failed, type, result }, { status: failed ? 503 : 200, headers: { "Cache-Control": "no-store" } });
+  } catch (error) {
+    if (error instanceof OperationBusyError) return NextResponse.json(
+      { ok: false, error: "operation_in_progress" }, { status: 409, headers: { "Retry-After": "5" } },
     );
+    console.error("Scheduled turn failed", error);
+    return NextResponse.json({ ok: false, error: "scheduled_turn_failed" }, { status: 503 });
   }
 }

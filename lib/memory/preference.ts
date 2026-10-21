@@ -1,172 +1,89 @@
 import { prisma } from "@/lib/db";
+import { currentEventKey, writeTransaction } from "@/lib/operations";
+import type { Prisma } from "@/app/generated/prisma/client";
 
 export const DISLIKE_THRESHOLD = 0.5;
-const DECAY_AFTER_DAYS = 14;
-const DECAY_STEP = 0.1;
-const SWAP_BOOST = 0.2;
-const COMPLETE_BOOST = 0.15;
+const DAY = 86400000;
 
-function dislikeKey(mealKey: string) {
-  return `dislike:${mealKey}`;
-}
-function preferKey(mealKey: string) {
-  return `prefer:${mealKey}`;
-}
-
-/**
- * MVP writes are rule-driven from button actions only -- no LLM extraction.
- * Swapping away from a meal repeatedly raises confidence that it's disliked.
- *
- * Opposite keys attenuate each other: boosting dislike:X weakens prefer:X by
- * the same amount (and vice versa), so the system converges to ONE answer for
- * "does the user like X" instead of letting contradictory rows grow together.
- */
 export async function recordSwap(userId: string, mealKey: string) {
-  await upsertPreference(userId, dislikeKey(mealKey), "food", SWAP_BOOST, "button_action");
-  await attenuatePreference(userId, preferKey(mealKey), SWAP_BOOST);
+  return recordPreferenceSignal(userId, mealKey, "dislike");
 }
 
-/** Completing a meal (without ever swapping it) reinforces it as a preference. */
 export async function recordCompletion(userId: string, mealKey: string) {
-  await upsertPreference(userId, preferKey(mealKey), "food", COMPLETE_BOOST, "button_action");
-  await attenuatePreference(userId, dislikeKey(mealKey), COMPLETE_BOOST);
+  return recordPreferenceSignal(userId, mealKey, "like");
 }
 
-/**
- * Swap-attribution answers (ask_user ground truth):
- * - "不爱吃" -> the inference is confirmed by the user: mark it, ensure it
- *   sits safely above the filter threshold, and exempt it from decay.
- * - "今天没有/想换口味" -> the swap was misattributed: revert that boost.
- */
+export async function recordPreferenceSignal(userId: string, mealKey: string, signal: "dislike" | "like") {
+  return writeTransaction(async (db) => {
+    const event = currentEventKey();
+    if (event) {
+      const evidence = await db.preferenceEvidence.createMany({
+        data: [{ key: `${event}:preference:${mealKey}:${signal}` }], skipDuplicates: true,
+      });
+      if (!evidence.count) return;
+    }
+    const boost = signal === "dislike" ? 0.2 : 0.15;
+    const key = `${signal === "dislike" ? "dislike" : "prefer"}:${mealKey}`;
+    const opposite = `${signal === "dislike" ? "prefer" : "dislike"}:${mealKey}`;
+    const now = new Date();
+    await db.preferenceMemory.upsert({
+      where: { userId_key: { userId, key } },
+      create: { userId, key, category: "food", confidence: 0.3 + boost, source: "button_action", lastConfirmedAt: now },
+      update: { confidence: { increment: boost }, evidenceCount: { increment: 1 }, lastConfirmedAt: now, lastDecayedAt: null },
+    });
+    const pref = await db.preferenceMemory.findUniqueOrThrow({ where: { userId_key: { userId, key } } });
+    if (pref.confidence > 1) await db.preferenceMemory.update({ where: { id: pref.id }, data: { confidence: 1 } });
+    await attenuate(db, userId, opposite, boost);
+  });
+}
+
+async function attenuate(db: Prisma.TransactionClient, userId: string, key: string, amount: number) {
+  const pref = await db.preferenceMemory.findUnique({ where: { userId_key: { userId, key } } });
+  if (pref) await db.preferenceMemory.update({ where: { id: pref.id }, data: { confidence: Math.max(0, pref.confidence - amount) } });
+}
+
 export async function confirmDislike(userId: string, mealKey: string) {
-  const key = dislikeKey(mealKey);
-  const existing = await prisma.preferenceMemory.findUnique({ where: { userId_key: { userId, key } } });
-  if (!existing) return;
-  await prisma.preferenceMemory.update({
-    where: { id: existing.id },
-    data: {
-      confidence: Math.max(existing.confidence, DISLIKE_THRESHOLD + 0.2),
-      source: "user_confirmed",
-      lastConfirmedAt: new Date(),
-    },
+  return writeTransaction(async (db) => {
+    const pref = await db.preferenceMemory.findUnique({ where: { userId_key: { userId, key: `dislike:${mealKey}` } } });
+    if (pref) await db.preferenceMemory.update({
+      where: { id: pref.id }, data: { confidence: Math.max(pref.confidence, 0.7), source: "user_confirmed", lastConfirmedAt: new Date(), lastDecayedAt: null },
+    });
   });
 }
 
 export async function revertSwapSignal(userId: string, mealKey: string) {
-  await attenuatePreference(userId, dislikeKey(mealKey), SWAP_BOOST);
+  return writeTransaction((db) => attenuate(db, userId, `dislike:${mealKey}`, 0.2));
 }
 
-async function attenuatePreference(userId: string, key: string, amount: number) {
-  const existing = await prisma.preferenceMemory.findUnique({ where: { userId_key: { userId, key } } });
-  if (!existing || existing.confidence <= 0) return;
-  await prisma.preferenceMemory.update({
-    where: { id: existing.id },
-    data: { confidence: Math.max(0, existing.confidence - amount) },
-  });
-}
-
-/**
- * Generic entry point for the Agent's `record_preference_signal` tool. The
- * model only ever chooses a discrete signal ("dislike" | "like") -- the
- * actual confidence math stays in code (SWAP_BOOST/COMPLETE_BOOST), the same
- * guardrail as recordSwap/recordCompletion. Never accept a raw confidence
- * float from the model.
- */
-export async function recordPreferenceSignal(
-  userId: string,
-  mealKey: string,
-  signal: "dislike" | "like"
-) {
-  if (signal === "dislike") return recordSwap(userId, mealKey);
-  return recordCompletion(userId, mealKey);
-}
-
-async function upsertPreference(
-  userId: string,
-  key: string,
-  category: string,
-  boost: number,
-  source: string
-) {
-  const existing = await prisma.preferenceMemory.findUnique({
-    where: { userId_key: { userId, key } },
-  });
-
-  if (!existing) {
-    await prisma.preferenceMemory.create({
-      data: {
-        userId,
-        key,
-        category,
-        confidence: Math.min(1, 0.3 + boost),
-        source,
-        evidenceCount: 1,
-        lastConfirmedAt: new Date(),
-      },
+/** Grace period: 14 days. Each subsequent completed week is charged only once. */
+export async function decayStalePreferences(userId: string, now = new Date()) {
+  return writeTransaction(async (db) => {
+    const stale = await db.preferenceMemory.findMany({
+      where: { userId, lastConfirmedAt: { lte: new Date(now.getTime() - 14 * DAY) }, confidence: { gt: 0 }, source: { not: "user_confirmed" } },
     });
-    return;
-  }
-
-  await prisma.preferenceMemory.update({
-    where: { id: existing.id },
-    data: {
-      confidence: Math.min(1, existing.confidence + boost),
-      evidenceCount: existing.evidenceCount + 1,
-      lastConfirmedAt: new Date(),
-    },
+    for (const pref of stale) {
+      const firstDecay = pref.lastConfirmedAt.getTime() + 14 * DAY;
+      const from = pref.lastDecayedAt?.getTime() ?? firstDecay - 7 * DAY;
+      const weeks = Math.floor((now.getTime() - from) / (7 * DAY));
+      if (weeks < 1) continue;
+      await db.preferenceMemory.update({
+        where: { id: pref.id },
+        data: { confidence: Math.max(0, pref.confidence - 0.1 * weeks), lastDecayedAt: new Date(from + weeks * 7 * DAY) },
+      });
+    }
   });
 }
 
-/**
- * Lazily decay confidence for preferences that haven't been reconfirmed in a
- * while, so old signals ("didn't like this 3 months ago") don't stay
- * permanent. Call this once per day (at the morning trigger) before planning.
- */
-export async function decayStalePreferences(userId: string) {
-  const cutoff = new Date(Date.now() - DECAY_AFTER_DAYS * 24 * 60 * 60 * 1000);
-  const stale = await prisma.preferenceMemory.findMany({
-    // user_confirmed preferences are explicit ground truth, not inference --
-    // they don't go stale the way behavioral signals do, so they skip decay.
-    where: { userId, lastConfirmedAt: { lt: cutoff }, confidence: { gt: 0 }, source: { not: "user_confirmed" } },
-  });
-
-  for (const pref of stale) {
-    const weeksStale = Math.max(
-      1,
-      Math.floor((Date.now() - pref.lastConfirmedAt.getTime()) / (7 * 24 * 60 * 60 * 1000))
-    );
-    const newConfidence = Math.max(0, pref.confidence - DECAY_STEP * weeksStale);
-    await prisma.preferenceMemory.update({
-      where: { id: pref.id },
-      data: { confidence: newConfidence },
-    });
-  }
-}
-
-/** Tier 2 read access for the Agent's `search_preferences` tool. */
-export async function searchPreferences(
-  userId: string,
-  opts: { category?: string; minConfidence?: number } = {}
-) {
+export async function searchPreferences(userId: string, opts: { category?: string; minConfidence?: number } = {}) {
   return prisma.preferenceMemory.findMany({
-    where: {
-      userId,
-      category: opts.category,
-      confidence: opts.minConfidence !== undefined ? { gte: opts.minConfidence } : undefined,
-    },
+    where: { userId, category: opts.category, confidence: opts.minConfidence !== undefined ? { gte: opts.minConfidence } : undefined },
     orderBy: { confidence: "desc" },
   });
 }
 
-/** Active (non-decayed) disliked meal keys, used to filter the planner. */
 export async function getActiveDislikedMealKeys(userId: string): Promise<string[]> {
   const rows = await prisma.preferenceMemory.findMany({
-    where: {
-      userId,
-      category: "food",
-      key: { startsWith: "dislike:" },
-      confidence: { gte: DISLIKE_THRESHOLD },
-    },
+    where: { userId, category: "food", key: { startsWith: "dislike:" }, confidence: { gte: DISLIKE_THRESHOLD } },
   });
-  return rows.map((r) => r.key.replace("dislike:", ""));
+  return rows.map((row) => row.key.replace("dislike:", ""));
 }

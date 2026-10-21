@@ -2,6 +2,8 @@
 
 一个几乎没有"聊天界面"感觉的个人 Agent：你不用打开对话框，它会按早/午/晚三个时间点主动找你。减肥是演示场景，但这个项目真正要展示的是**一个 tool-using Agent 的深度**——有规划、有工具边界、有跨轮记忆、有可观测 Trace，而不是一个"定时任务 + 模板拼文案"的自动化脚本。
 
+部署、登录与本轮修复的验收步骤见 [部署说明](docs/deployment.md)。
+
 ## 核心设计
 
 **Agent 内核**：每个触发点（早/午/晚/换一个）都会启动一轮 `runAgentTurn` / `runActionTurn`——DeepSeek（[@ai-sdk/deepseek](https://ai-sdk.dev/providers/ai-sdk-providers/deepseek)，通过 Vercel AI SDK 的 `generateText` + `tools` + `stopWhen` 多步循环）读取记忆、做出带理由的判断，再通过一组受限的工具把结果落库——模型不能直接写数据库或"假装"发了消息，必须经过工具，工具本身还会做白名单校验（见下）。
@@ -18,7 +20,7 @@
 | `create_daily_plan` / `update_daily_plan` | 写入/更新当日计划（`upsert` 语义，mealKey 会被代码白名单校验） |
 | `send_proactive_message` / `ask_user` | 把最终文案或澄清问题写入 Feed，二选一，是本轮通常的最后一步 |
 | `record_preference_signal` | 记录一次离散的「喜欢/不喜欢」信号——置信度的增量由代码算，模型不能直接给数值 |
-| `log_episode` | 写 Tier3 事件日志 |
+| 行为事件记录 | 由业务代码在实际操作成功后写入，模型不能自行记录用户已完成等事实 |
 
 这些约束不是写在 prompt 里的君子协定，是代码里的 `if` 判断（[lib/agent/tools/planning.ts](lib/agent/tools/planning.ts) 的 `assertValidMealKey`、[lib/memory/preference.ts](lib/memory/preference.ts) 的固定置信度增量）——这是「Agent 突破纯 LLM 胡编上限」这句话在这个项目里唯一站得住的地方。
 
@@ -41,13 +43,13 @@
 **护栏**（[lib/orchestrator/daily-orchestrator.ts](lib/orchestrator/daily-orchestrator.ts)、[lib/agent/runner.ts](lib/agent/runner.ts)）：
 
 - 幂等性按「今天这一轮的消息是否已发出」判断，不是按「计划是否已存在」——避免真实 LLM 调用一半失败（plan 建了、消息没发出）导致当天永久静默。
-- `stopWhen: stepCountIs(6)` 限制单轮步数；命中上限仍未产出消息时，发一条确定性兜底消息，而不是让用户当天什么都收不到。
+- `stopWhen: stepCountIs(6)` 限制单轮步数，90 秒限制模型总调用时间；未收敛或抛异常时都会尝试确定性兜底。兜底也失败时保留失败 Trace，Cron 返回 503。
 
-**单用户**：没有登录/多租户，`prisma.user.findFirst()` 即拿到唯一用户（见 [lib/user.ts](lib/user.ts)）。
+**单用户**：所有者密码登录，使用签名、HttpOnly 会话 Cookie；页面与 Server Actions 都校验会话。未配置 `ADMIN_PASSWORD` / `SESSION_SECRET` 时拒绝访问。Cron 独立验证 `CRON_SECRET`。数据库仍只有一个用户，没有开放注册或多租户。
 
 ## 本地开发
 
-数据库是 Postgres（生产和本地共用一个 Neon 实例，或自建一个）。先把 `.env.example` 复制为 `.env`，填入 `DATABASE_URL`（pooler 连接串，运行时用）和 `DIRECT_DATABASE_URL`（直连串，迁移用；Neon 上就是去掉 `-pooler` 的同一地址）。
+数据库是 Postgres；本地与预览使用独立开发库或 Neon 分支，生产使用独立的生产库。先把 `.env.example` 复制为 `.env`，设置 `ADMIN_PASSWORD` / `SESSION_SECRET`，并填入 `DATABASE_URL`（pooler 连接串，运行时用）和 `DIRECT_DATABASE_URL`（直连串，迁移用；Neon 上就是去掉 `-pooler` 的同一地址）。
 
 ```bash
 npm install
@@ -81,8 +83,8 @@ DEEPSEEK_MODEL=deepseek-v4-pro   # 或 deepseek-v4-flash；旧别名 deepseek-ch
 ## 部署（Vercel）
 
 1. 推送到 GitHub，在 Vercel 导入这个仓库（代码已经是 Postgres 方言，不需要额外改造）。
-2. 建一个 Neon（或 Vercel Postgres）免费库，在 Vercel 项目环境变量里设置 `DATABASE_URL`（pooler 连接串）和 `DIRECT_DATABASE_URL`（直连串）。构建命令里的 `prisma migrate deploy` 会在每次部署时自动把未应用的迁移建进库里。
-3. 再设置 `CRON_SECRET`（任意随机字符串）、`DEEPSEEK_API_KEY`、`DEEPSEEK_MODEL`。设置 `CRON_SECRET` 后 Vercel Cron 会自动带上 `Authorization: Bearer $CRON_SECRET`，`/api/cron/[type]` 会校验这个值，避免接口被外部随意调用（同时首页的开发者面板在线上会因缺少密钥而失效，属于预期行为）。
+2. 建一个 Neon（或 Vercel Postgres）免费库，在 Vercel 项目环境变量里设置 `DATABASE_URL`（pooler 连接串）和 `DIRECT_DATABASE_URL`（直连串）。`npm run build` 会在 Vercel 构建时为对应环境执行迁移；Preview 必须配置独立的 `PREVIEW_DATABASE_URL` / `PREVIEW_DIRECT_DATABASE_URL`，普通本地构建不会迁移数据库。
+3. 再设置 `ADMIN_PASSWORD`（至少 16 个字符）、`SESSION_SECRET`（至少 32 个字符）、`CRON_SECRET`（随机字符串）、`DEEPSEEK_API_KEY`、`DEEPSEEK_MODEL`。设置 `CRON_SECRET` 后 Vercel Cron 会自动带上 `Authorization: Bearer $CRON_SECRET`，`/api/cron/[type]` 会校验这个值，避免接口被外部随意调用（生产环境不显示开发者触发面板；未配置 `CRON_SECRET` 时接口关闭）。
 4. `vercel.json` 已经配置了三个 Cron（07:30 / 12:00 / 20:30 北京时间，换算成 UTC；Hobby 计划有 ±59 分钟的触发弹性），以及 `"regions": ["sin1"]` 把函数固定在新加坡、和 Neon 同区域——不配的话函数默认在美东，每次数据库查询多 200ms+ 跨洋往返。如果你在 onboarding 里改了提醒时间，需要同步手动改 cron 表达式——Vercel Cron 是部署时静态配置的，不会读数据库里的个性化时间。
 
 ## 目录结构
