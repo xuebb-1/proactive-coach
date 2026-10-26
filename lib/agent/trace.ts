@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/db";
+import { writeTransaction } from "@/lib/operations";
 import type { AgentTraceSource, AgentTraceStatus } from "@/app/generated/prisma/client";
 
 export type TraceStep =
@@ -25,7 +26,7 @@ export async function saveTrace(opts: {
   delivery?: "agent" | "fallback" | "none" | "deterministic";
   failureKind?: string;
 }) {
-  return prisma.agentTrace.create({
+  return writeTransaction((db) => db.agentTrace.create({
     data: {
       userId: opts.userId,
       trigger: opts.trigger,
@@ -43,7 +44,7 @@ export async function saveTrace(opts: {
       delivery: opts.delivery,
       failureKind: opts.failureKind,
     },
-  });
+  }));
 }
 
 export type ParsedTrace = Awaited<ReturnType<typeof prisma.agentTrace.findMany>>[number] & {

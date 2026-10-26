@@ -23,35 +23,18 @@ export default async function TodayPage() {
 
   const dateKey = todayKeyForTimeZone(user.profile.timezone);
 
-  const morningPlan = await prisma.dailyPlan.findUnique({
+  const [morningPlan, eveningPlan] = await Promise.all([prisma.dailyPlan.findUnique({
     where: { userId_date_type: { userId: user.id, date: dateKey, type: "MORNING" } },
-  });
-  const eveningPlan = await prisma.dailyPlan.findUnique({
+  }), prisma.dailyPlan.findUnique({
     where: { userId_date_type: { userId: user.id, date: dateKey, type: "EVENING" } },
-  });
+  })]);
 
-  // Slot messages exclude ASK_USER: a clarification question typed MORNING
-  // must not hijack the morning slot. Ordered by createdAt so the result is
-  // deterministic if a slot ever ends up with more than one message.
+  // Questions render separately; every normal daily slot has a unique deliveryKey.
+  const slotMessage = (slot: "MORNING" | "LUNCH" | "EVENING") => prisma.message.findFirst({
+    where: { userId: user.id, deliveryKey: `${user.id}:${dateKey}:${slot}`, require: { not: "ASK_USER" } },
+  });
   const [morningMessage, lunchMessage, eveningMessage, askUserMessages] = await Promise.all([
-    morningPlan
-      ? prisma.message.findFirst({
-          where: { planId: morningPlan.id, type: "MORNING", require: { not: "ASK_USER" } },
-          orderBy: { createdAt: "asc" },
-        })
-      : null,
-    morningPlan
-      ? prisma.message.findFirst({
-          where: { planId: morningPlan.id, type: "LUNCH", require: { not: "ASK_USER" } },
-          orderBy: { createdAt: "asc" },
-        })
-      : null,
-    eveningPlan
-      ? prisma.message.findFirst({
-          where: { planId: eveningPlan.id, type: "EVENING", require: { not: "ASK_USER" } },
-          orderBy: { createdAt: "asc" },
-        })
-      : null,
+    slotMessage("MORNING"), slotMessage("LUNCH"), slotMessage("EVENING"),
     // ask_user messages may have no plan attached at all -- fetch them by
     // require, not via the plan, or they'd never surface.
     prisma.message.findMany({
@@ -102,15 +85,15 @@ export default async function TodayPage() {
           <MessageCard key={m.id} message={m} plan={null} />
         ))}
         {morningMessage && (
-          <MessageCard message={morningMessage} plan={morningPlan ? { status: morningPlan.status } : null} />
+          <MessageCard message={morningMessage} plan={morningPlan} />
         )}
         {lunchMessage && (
-          <MessageCard message={lunchMessage} plan={morningPlan ? { status: morningPlan.status } : null} />
+          <MessageCard message={lunchMessage} plan={morningPlan} />
         )}
         {eveningMessage && (
           <MessageCard
             message={eveningMessage}
-            plan={eveningPlan ? { status: eveningPlan.status } : null}
+            plan={eveningPlan}
             todaysWeightKg={todaysCheckin?.weightKg ?? null}
           />
         )}

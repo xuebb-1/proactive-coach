@@ -45,6 +45,29 @@ describe("timezone-aware scheduling", () => {
     expect(due).toHaveLength(50);
     expect(new Set(due.map((item) => item.dedupeKey)).size).toBe(50);
   });
+
+  it("opens the five-minute window at the scheduled minute and closes it exactly at its end", () => {
+    const dueAt = (instant: string) => findDueAgentTriggers([profile], new Date(instant));
+    expect(dueAt("2026-03-08T11:29:59Z")).toHaveLength(0);
+    expect(dueAt("2026-03-08T11:30:00Z")).toHaveLength(1);
+    expect(dueAt("2026-03-08T11:34:59Z")).toHaveLength(1);
+    expect(dueAt("2026-03-08T11:35:00Z")).toHaveLength(0);
+  });
+
+  it("uses one event key for both occurrences of a fall-back local hour", () => {
+    const early = { ...profile, morningTime: "01:30" };
+    const first = findDueAgentTriggers([early], new Date("2026-11-01T05:30:00Z"));
+    const repeated = findDueAgentTriggers([early], new Date("2026-11-01T06:30:00Z"));
+    expect(first).toHaveLength(1);
+    expect(repeated).toHaveLength(1);
+    expect(first[0].dedupeKey).toBe(repeated[0].dedupeKey);
+  });
+
+  it("selects only due users using each user's local time", () => {
+    const users = [profile, { ...profile, userId: "shanghai", timezone: "Asia/Shanghai" }];
+    const due = findDueAgentTriggers(users, new Date("2026-03-08T11:30:00Z"));
+    expect(due.map(item => item.userId)).toEqual(["user-1"]);
+  });
 });
 
 describe("rollout flags", () => {

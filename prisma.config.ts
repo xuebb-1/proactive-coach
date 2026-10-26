@@ -9,8 +9,10 @@ export default defineConfig({
     path: "prisma/migrations",
   },
   datasource: {
-    // CLI (migrations) should bypass the connection pooler; fall back to the
-    // pooled URL if no direct URL is configured.
-    url: process.env["DIRECT_DATABASE_URL"] ?? process.env["DATABASE_URL"],
+    // Preview migrations can only target the explicitly provisioned preview
+    // database, including when the CLI is invoked outside the build wrapper.
+    url: process.env.VERCEL_ENV === "preview"
+      ? process.env.PREVIEW_DIRECT_DATABASE_URL
+      : process.env.DIRECT_DATABASE_URL ?? process.env.DATABASE_URL,
   },
 });

@@ -33,9 +33,15 @@ export const runDailyAgent = inngest.createFunction(
       };
 
       try {
-        if (event.data.trigger === "morning") return await runMorning(user, execution);
-        if (event.data.trigger === "lunch") return await runLunch(user, execution);
-        return await runEvening(user, execution);
+        const handler = event.data.trigger === "morning"
+          ? runMorning
+          : event.data.trigger === "lunch" ? runLunch : runEvening;
+        const result = await handler(user, execution);
+        // A resolved promise without a persisted final message must remain retryable.
+        if ("status" in result && result.status === "failed" && !result.finalMessageId) {
+          throw new Error("Agent turn failed before delivery");
+        }
+        return result;
       } catch (error) {
         Sentry.captureException(error, {
           tags: { trigger: event.data.trigger, source: "inngest" },

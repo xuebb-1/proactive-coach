@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCurrentUser, getOnboardedUserById } from "@/lib/user";
 import { runMorning, runLunch, runEvening } from "@/lib/orchestrator/daily-orchestrator";
+import { OperationBusyError } from "@/lib/operations";
 
 export const dynamic = "force-dynamic";
 // Real Agent turns take 15-80s (measured); Vercel's default function timeout
@@ -14,24 +15,22 @@ const HANDLERS = {
   evening: runEvening,
 } as const;
 
-function isAuthorized(req: NextRequest): boolean {
-  const secret = process.env.CRON_SECRET;
-  // Local development can use the signed-in user. Production admin calls
-  // require a secret; routine scheduling is handled by Inngest.
-  if (!secret) return process.env.NODE_ENV !== "production";
-  return req.headers.get("authorization") === `Bearer ${secret}`;
-}
-
 export async function GET(req: NextRequest, ctx: { params: Promise<{ type: string }> }) {
-  if (!isAuthorized(req)) {
+  const secret = process.env.CRON_SECRET;
+  if (!secret && (process.env.NODE_ENV === "production" || process.env.VERCEL)) {
+    return NextResponse.json({ error: "cron_not_configured" }, { status: 503 });
+  }
+  const authorizedAdmin = Boolean(secret && req.headers.get("authorization") === `Bearer ${secret}`);
+  // Explicit background identities always require the configured bearer secret.
+  if ((secret && !authorizedAdmin) || (req.nextUrl.searchParams.has("userId") && !authorizedAdmin)) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
 
   const { type } = await ctx.params;
-  const handler = HANDLERS[type as keyof typeof HANDLERS];
-  if (!handler) {
-    return NextResponse.json({ error: `unknown trigger type: ${type}` }, { status: 400 });
+  if (!Object.hasOwn(HANDLERS, type)) {
+    return NextResponse.json({ error: "unknown_trigger_type" }, { status: 400 });
   }
+  const handler = HANDLERS[type as keyof typeof HANDLERS];
 
   try {
     const requestedUserId = req.nextUrl.searchParams.get("userId");
@@ -42,11 +41,20 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ type: strin
       return NextResponse.json({ ok: false, type, error: "Onboarded user not found" }, { status: 404 });
     }
     const result = await handler({ id: user.id, profile: user.profile, persona: user.persona });
+    if ("status" in result && result.status === "failed" && !result.finalMessageId) {
+      return NextResponse.json({ ok: false, type, error: "agent_delivery_failed" }, { status: 503 });
+    }
     return NextResponse.json({ ok: true, type, result });
   } catch (err) {
+    if (err instanceof OperationBusyError) {
+      return NextResponse.json(
+        { ok: false, type, error: "operation_in_progress" },
+        { status: 409, headers: { "Retry-After": "5" } }
+      );
+    }
     return NextResponse.json(
-      { ok: false, type, error: err instanceof Error ? err.message : String(err) },
-      { status: 500 }
+      { ok: false, type, error: "agent_unavailable" },
+      { status: 503 }
     );
   }
 }
