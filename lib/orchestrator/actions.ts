@@ -1,177 +1,116 @@
+import { UserInputError } from "@/lib/user-error";
 import { prisma } from "@/lib/db";
-import {
-  recordCompletion,
-  recordSwap,
-  confirmDislike,
-  revertSwapSignal,
-  DISLIKE_THRESHOLD,
-} from "@/lib/memory/preference";
+import { recordCompletion, recordSwap, confirmDislike, revertSwapSignal, DISLIKE_THRESHOLD } from "@/lib/memory/preference";
 import { logEvent } from "@/lib/memory/episodic";
-import {
-  endOfDayForTimeZone,
-  startOfDayForTimeZone,
-  todayKeyForTimeZone,
-} from "@/lib/date";
+import { endOfDayForTimeZone, todayKeyForTimeZone } from "@/lib/date";
 import { runActionTurn, saveTrivialActionTrace } from "@/lib/agent/runner";
 import { getScenario } from "@/lib/scenarios/registry";
 import { messagingImpls } from "@/lib/agent/tools/messaging";
 import { createToolCtx } from "@/lib/agent/tools/context";
+import { withUserOperation, writeTransaction } from "@/lib/operations";
+import type { Prisma } from "@/app/generated/prisma/client";
 
 export type ButtonAction = "confirm" | "swap" | "complete" | "skip";
 
-/**
- * Single entry point for every button click in the Today Card.
- *
- * Only `swap` goes through the Agent (`runActionTurn`) -- it's the one
- * button with real judgment space (picking among candidates). confirm /
- * complete / skip are unambiguous state transitions; routing those through
- * an LLM call would only add latency/cost/uncertainty with zero upside, so
- * they stay exactly as deterministic as before. Each still records a
- * trivial DETERMINISTIC trace so the /trace timeline doesn't have gaps.
- */
-export async function respondToMessage(userId: string, messageId: string, action: ButtonAction) {
-  const message = await prisma.message.findUnique({
-    where: { id: messageId },
-    include: { plan: true },
-  });
-  if (!message || message.userId !== userId) throw new Error("Message not found");
-  if (!message.plan) throw new Error("Message has no associated plan");
-  if (message.respondedAt) throw new Error("Message already responded");
-  const allowedActions: Partial<Record<typeof message.require, ButtonAction[]>> = {
-    CONFIRM_OR_SWAP: ["confirm", "swap"],
-    CONFIRM_OR_SKIP: ["complete", "skip"],
-  };
-  if (!allowedActions[message.require]?.includes(action)) {
-    throw new Error("Action is not allowed for this message");
+function messagePayload(raw: string): Record<string, unknown> {
+  try {
+    const payload: unknown = JSON.parse(raw);
+    return payload && typeof payload === "object" && !Array.isArray(payload) ? payload as Record<string, unknown> : {};
+  } catch {
+    return {};
   }
-
-  const plan = message.plan;
-
-  if (action === "confirm") {
-    await prisma.dailyPlan.update({ where: { id: plan.id }, data: { status: "CONFIRMED" } });
-    await logEvent({ userId, eventType: "ACTION_CONFIRM", planType: "MORNING", mealKey: plan.mealKey ?? undefined });
-    await saveTrivialActionTrace({ userId, trigger: "confirm", goal: "用户点击确认，无歧义状态转移。", planId: plan.id });
-  } else if (action === "swap") {
-    const profile = await prisma.userProfile.findUnique({ where: { userId } });
-    const explicitDislikes: string[] = JSON.parse(profile?.dislikedFoods || "[]");
-    const oldMealKey = plan.mealKey ?? "";
-    const timezone = profile?.timezone ?? "Asia/Shanghai";
-    const dateKey = todayKeyForTimeZone(timezone);
-    const scenario = getScenario(profile?.scenarioId);
-
-    const goal = scenario.buildSwapGoal({
-      dateKey,
-      planId: plan.id,
-      oldMealKey,
-      oldMealTitle: plan.mealTitle ?? "（未知）",
-    });
-
-    const result = await runActionTurn({
-      userId,
-      trigger: "swap",
-      goal,
-      dateKey,
-      explicitDislikedFoods: explicitDislikes,
-      planId: plan.id,
-      previousMealKey: oldMealKey,
-      dayEndsAt: endOfDayForTimeZone(timezone),
-      scenarioId: scenario.id,
-    });
-
-    // The Agent turn can fail or finish without actually changing the meal.
-    // The user clicked "换一个" -- silently doing nothing is not acceptable, so
-    // verify the plan really changed and fall back to the rule-based picker.
-    const updatedPlan = await prisma.dailyPlan.findUnique({ where: { id: plan.id } });
-    const mealChanged = !!updatedPlan?.mealKey && updatedPlan.mealKey !== oldMealKey;
-    if (!mealChanged) {
-      const newMeal = await scenario.pickSwapMeal(userId, dateKey, oldMealKey, explicitDislikes);
-      await prisma.dailyPlan.update({
-        where: { id: plan.id },
-        data: { mealKey: newMeal.key, mealTitle: newMeal.title, kcal: newMeal.kcal, status: "SWAPPED" },
-      });
-      await saveTrivialActionTrace({
-        userId,
-        trigger: "swap",
-        goal: `Agent swap 轮未完成换菜（status=${result.status}），代码确定性兜底换成「${newMeal.title}」。`,
-        planId: plan.id,
-      });
-    }
-
-    // Memory writes are too important to depend on prompt obedience: if the
-    // model skipped record_preference_signal, backfill the dislike in code.
-    if (oldMealKey && !result.preferenceSignalRecorded) {
-      await recordSwap(userId, oldMealKey);
-    }
-
-    await logEvent({ userId, eventType: "ACTION_SWAP", planType: "MORNING", mealKey: oldMealKey || undefined });
-
-    if (oldMealKey) {
-      await maybeAskSwapAttribution({
-        userId,
-        planId: plan.id,
-        mealKey: oldMealKey,
-        mealTitle: plan.mealTitle ?? oldMealKey,
-        dateKey,
-        timezone,
-      });
-    }
-  } else if (action === "complete") {
-    await prisma.dailyPlan.update({ where: { id: plan.id }, data: { status: "COMPLETED" } });
-    if (plan.mealKey) await recordCompletion(userId, plan.mealKey);
-    await logEvent({ userId, eventType: "ACTION_COMPLETE", planType: plan.type, mealKey: plan.mealKey ?? undefined });
-    await saveTrivialActionTrace({ userId, trigger: "complete", goal: "用户点击完成，无歧义状态转移。", planId: plan.id });
-  } else if (action === "skip") {
-    await prisma.dailyPlan.update({ where: { id: plan.id }, data: { status: "SKIPPED" } });
-    await logEvent({ userId, eventType: "ACTION_SKIP", planType: plan.type, mealKey: plan.mealKey ?? undefined });
-    await saveTrivialActionTrace({ userId, trigger: "skip", goal: "用户点击跳过，无歧义状态转移。", planId: plan.id });
-  }
-
-  await prisma.message.update({
-    where: { id: message.id },
-    data: { respondedAt: new Date(), responseAction: action },
-  });
-
-  return { ok: true };
 }
 
-/**
- * Swap-attribution ask (the ground-truth loop for Tier2 memory). A swap is an
- * ambiguous signal -- "don't like it" vs "canteen didn't have it today" vs
- * "just wanted variety" -- so before a dislike inference starts filtering the
- * candidate list, confirm it with the user once.
- *
- * When/whether to ask is a deterministic CODE policy, not a model judgment:
- * - only when dislike confidence has reached the filter threshold (the answer
- *   decides whether this meal disappears from candidates -- worth one question)
- * - never for preferences the user already confirmed
- * - at most one ask_user message per day (don't turn the feed into a survey)
- */
-async function maybeAskSwapAttribution(params: {
-  userId: string;
-  planId: string;
-  mealKey: string;
-  mealTitle: string;
-  dateKey: string;
-  timezone: string;
+export async function respondToMessage(userId: string, messageId: string, action: ButtonAction) {
+  return withUserOperation(userId, `message:${messageId}:${action}`, async () => {
+    const message = await prisma.message.findUnique({ where: { id: messageId }, include: { plan: true } });
+    if (!message || message.userId !== userId || !message.plan || message.plan.userId !== userId) throw new UserInputError("找不到这条计划消息。");
+    if (message.respondedAt) {
+      if (message.responseAction === action) return { ok: true };
+      throw new UserInputError("这条消息已经处理过，请刷新页面。");
+    }
+    const profile = await prisma.userProfile.findUnique({ where: { userId } });
+    if (!profile) throw new UserInputError("请先完成个人资料。");
+    const now = new Date();
+    const dateKey = todayKeyForTimeZone(profile.timezone, now);
+    const dayEndsAt = endOfDayForTimeZone(profile.timezone, now);
+    if (!message.expiresAt || message.expiresAt <= now || message.plan.date !== dateKey ||
+        (message.plan.expiresAt && message.plan.expiresAt <= now)) throw new UserInputError("这条消息已过期。");
+    const allowed = message.require === "CONFIRM_OR_SWAP" ? ["confirm", "swap"] : message.require === "CONFIRM_OR_SKIP" ? ["complete", "skip"] : [];
+    if (!allowed.includes(action)) throw new UserInputError("该消息不支持这个操作。");
+    const plan = message.plan;
+    if (!["PENDING", "CONFIRMED", "SWAPPED"].includes(plan.status)) throw new UserInputError("该计划已经结束，请刷新页面。");
+
+    if (action === "swap") {
+      const payload = messagePayload(message.payload);
+      const swapFrom = typeof payload.swapFrom === "string" ? payload.swapFrom : undefined;
+      const oldMealKey = swapFrom ?? plan.mealKey;
+      if (!oldMealKey) throw new UserInputError("当前计划没有可替换的餐食。");
+      const explicitDislikes: string[] = JSON.parse(profile.dislikedFoods || "[]");
+      const scenario = getScenario(profile.scenarioId);
+      if (!swapFrom) await writeTransaction((db) => db.message.update({
+        where: { id: messageId }, data: { payload: JSON.stringify({ ...payload, swapFrom: oldMealKey }) },
+      }));
+
+      // A previous worker may have changed the plan before failing to acknowledge the message.
+      if (plan.mealKey === oldMealKey) {
+        const result = await runActionTurn({
+          userId, trigger: "swap", dateKey, explicitDislikedFoods: explicitDislikes,
+          planId: plan.id, previousMealKey: oldMealKey, dayEndsAt, scenarioId: scenario.id,
+          goal: scenario.buildSwapGoal({ dateKey, planId: plan.id, oldMealKey, oldMealTitle: plan.mealTitle ?? oldMealKey }),
+        });
+        const updated = await prisma.dailyPlan.findUniqueOrThrow({ where: { id: plan.id } });
+        if (!updated.mealKey || updated.mealKey === oldMealKey) {
+          const replacement = await scenario.pickSwapMeal(userId, dateKey, oldMealKey, explicitDislikes);
+          await writeTransaction((db) => db.dailyPlan.update({
+            where: { id: plan.id },
+            data: { mealKey: replacement.key, mealTitle: replacement.title, kcal: replacement.kcal, status: "SWAPPED" },
+          }));
+          await saveTrivialActionTrace({
+            userId, trigger: "swap", planId: plan.id, goal: `模型换菜结果为 ${result.status}，由备用流程完成换菜。`,
+          });
+        }
+      }
+      await writeTransaction(async (db) => {
+        await recordSwap(userId, oldMealKey);
+        await logEvent({ userId, eventType: "ACTION_SWAP", planType: "MORNING", mealKey: oldMealKey });
+        await db.message.update({ where: { id: messageId }, data: { respondedAt: new Date(), responseAction: action } });
+        await maybeAskSwapAttribution(db, {
+          userId, planId: plan.id, mealKey: oldMealKey, mealTitle: oldMealKey, dateKey, dayEndsAt, scenarioId: scenario.id,
+        });
+      });
+      return { ok: true };
+    }
+
+    return writeTransaction(async (db) => {
+      const status = action === "confirm" ? "CONFIRMED" : action === "complete" ? "COMPLETED" : "SKIPPED";
+      await db.dailyPlan.update({ where: { id: plan.id }, data: { status } });
+      if (action === "complete" && plan.mealKey) await recordCompletion(userId, plan.mealKey);
+      await logEvent({
+        userId, eventType: action === "confirm" ? "ACTION_CONFIRM" : action === "complete" ? "ACTION_COMPLETE" : "ACTION_SKIP",
+        planType: plan.type, mealKey: plan.mealKey ?? undefined,
+      });
+      await saveTrivialActionTrace({ userId, trigger: action, goal: `用户操作：${action}。`, planId: plan.id });
+      await db.message.update({ where: { id: messageId }, data: { respondedAt: new Date(), responseAction: action } });
+      return { ok: true };
+    });
+  });
+}
+
+async function maybeAskSwapAttribution(db: Prisma.TransactionClient, params: {
+  userId: string; planId: string; mealKey: string; mealTitle: string; dateKey: string; dayEndsAt: Date; scenarioId: string;
 }) {
-  const { userId, planId, mealKey, mealTitle, dateKey, timezone } = params;
-
-  const pref = await prisma.preferenceMemory.findUnique({
-    where: { userId_key: { userId, key: `dislike:${mealKey}` } },
-  });
+  const { userId, mealKey, dateKey } = params;
+  const pref = await db.preferenceMemory.findUnique({ where: { userId_key: { userId, key: `dislike:${mealKey}` } } });
   if (!pref || pref.confidence < DISLIKE_THRESHOLD || pref.source === "user_confirmed") return;
-
-  const startOfDay = startOfDayForTimeZone(timezone, new Date());
-  const askedToday = await prisma.message.findFirst({
-    where: { userId, require: "ASK_USER", createdAt: { gte: startOfDay } },
-  });
-  if (askedToday) return;
-
-  const ctx = createToolCtx(userId, dateKey);
-  await messagingImpls.askUser(ctx, {
-    planId,
-    type: "MORNING",
-    question: `注意到你换掉了「${mealTitle}」，之后要少推这类吗？`,
+  if (await db.message.findUnique({ where: { deliveryKey: `${userId}:${dateKey}:ASK_USER` } })) return;
+  const meal = await db.meal.findFirst({ where: { key: mealKey, OR: [{ ownerId: null }, { ownerId: userId }] } });
+  // No trigger: business attribution owns ASK_USER, separate from a model's terminal daily message.
+  await messagingImpls.askUser(createToolCtx(userId, dateKey, {
+    dayEndsAt: params.dayEndsAt, scenarioId: params.scenarioId,
+  }), {
+    planId: params.planId, type: "MORNING",
+    question: `注意到你换掉了「${meal?.title ?? params.mealTitle}」，之后要少推这类吗？`,
     options: [
       { label: "对，不太爱吃", value: "dislike" },
       { label: "今天没有/不方便", value: "unavailable" },
@@ -182,69 +121,50 @@ async function maybeAskSwapAttribution(params: {
 }
 
 export async function submitCheckin(userId: string, weightKg: number, difficulty?: number) {
+  if (!Number.isFinite(weightKg) || weightKg <= 0 || weightKg > 500 ||
+      (difficulty !== undefined && (!Number.isInteger(difficulty) || difficulty < 1 || difficulty > 5))) throw new UserInputError("请输入有效的打卡数据。");
   const profile = await prisma.userProfile.findUnique({ where: { userId }, select: { timezone: true } });
-  const dateKey = todayKeyForTimeZone(profile?.timezone ?? "Asia/Shanghai");
-
-  await prisma.checkIn.upsert({
-    where: { userId_date: { userId, date: dateKey } },
-    create: { userId, date: dateKey, weightKg, difficulty },
-    update: { weightKg, difficulty },
-  });
-
-  await logEvent({ userId, eventType: "CHECKIN", metadata: { weightKg, difficulty } });
-
-  const eveningPlan = await prisma.dailyPlan.findUnique({
-    where: { userId_date_type: { userId, date: dateKey, type: "EVENING" } },
-  });
-  if (eveningPlan && eveningPlan.status === "PENDING") {
-    await prisma.dailyPlan.update({ where: { id: eveningPlan.id }, data: { status: "COMPLETED" } });
-  }
-  const eveningMessage = await prisma.message.findFirst({
-    where: { userId, planId: eveningPlan?.id, type: "EVENING", respondedAt: null },
-  });
-  if (eveningMessage) {
-    await prisma.message.update({
-      where: { id: eveningMessage.id },
-      data: { respondedAt: new Date(), responseAction: "checkin" },
+  if (!profile) throw new UserInputError("请先完成个人资料。");
+  const dateKey = todayKeyForTimeZone(profile.timezone);
+  return withUserOperation(userId, `checkin:${userId}:${dateKey}:${weightKg}:${difficulty ?? ""}`, () => writeTransaction(async (db) => {
+    await db.checkIn.upsert({
+      where: { userId_date: { userId, date: dateKey } },
+      create: { userId, date: dateKey, weightKg, difficulty }, update: { weightKg, difficulty },
     });
-  }
-
-  return { ok: true };
+    await logEvent({ userId, eventType: "CHECKIN", metadata: { weightKg, difficulty } });
+    const eveningPlan = await db.dailyPlan.findUnique({ where: { userId_date_type: { userId, date: dateKey, type: "EVENING" } } });
+    if (eveningPlan) {
+      await db.dailyPlan.update({ where: { id: eveningPlan.id }, data: { status: "COMPLETED" } });
+      await db.message.updateMany({
+        where: { userId, planId: eveningPlan.id, type: "EVENING", require: "CHECKIN", respondedAt: null },
+        data: { respondedAt: new Date(), responseAction: "checkin" },
+      });
+    }
+    return { ok: true };
+  }));
 }
 
-/** Respond to an `ask_user` clarification message with the chosen option value. */
 export async function respondToAskUser(userId: string, messageId: string, optionValue: string) {
-  const message = await prisma.message.findUnique({ where: { id: messageId } });
-  if (!message || message.userId !== userId) throw new Error("Message not found");
-  if (message.require !== "ASK_USER") throw new Error("Message is not an ask_user message");
-
-  let payload: { kind?: string; mealKey?: string } = {};
-  try {
-    payload = JSON.parse(message.payload || "{}");
-  } catch {
-    payload = {};
-  }
-
-  // Swap-attribution answers correct Tier2 memory (the ground-truth loop):
-  // confirmed dislike gets locked above the threshold and exempted from
-  // decay; a misattributed swap gets its boost reverted.
-  if (payload.kind === "swap_attribution" && payload.mealKey) {
-    if (optionValue === "dislike") {
-      await confirmDislike(userId, payload.mealKey);
-    } else {
-      await revertSwapSignal(userId, payload.mealKey);
+  return withUserOperation(userId, `answer:${messageId}`, () => writeTransaction(async (db) => {
+    const message = await db.message.findUnique({ where: { id: messageId } });
+    if (!message || message.userId !== userId || message.require !== "ASK_USER") throw new UserInputError("找不到这个问题。");
+    if (message.respondedAt) {
+      if (message.responseAction === optionValue) return { ok: true };
+      throw new UserInputError("这个问题已经回答过，请刷新页面。");
     }
-  }
-
-  await logEvent({
-    userId,
-    eventType: "ASK_USER_RESPONDED",
-    metadata: { messageId, optionValue, kind: payload.kind, mealKey: payload.mealKey, answer: optionValue },
-  });
-  await prisma.message.update({
-    where: { id: message.id },
-    data: { respondedAt: new Date(), responseAction: optionValue },
-  });
-
-  return { ok: true };
+    if (!message.expiresAt || message.expiresAt <= new Date()) throw new UserInputError("这个问题已过期。");
+    const payload = messagePayload(message.payload);
+    const options = Array.isArray(payload.options) ? payload.options : [];
+    if (!options.some((option: unknown) => option && typeof option === "object" && "value" in option && option.value === optionValue)) throw new UserInputError("请选择有效的选项。");
+    if (payload.kind === "swap_attribution" && typeof payload.mealKey === "string") {
+      if (optionValue === "dislike") await confirmDislike(userId, payload.mealKey);
+      else await revertSwapSignal(userId, payload.mealKey);
+    }
+    await logEvent({
+      userId, eventType: "ASK_USER_RESPONDED",
+      metadata: { messageId, optionValue, kind: payload.kind, mealKey: payload.mealKey, answer: optionValue },
+    });
+    await db.message.update({ where: { id: messageId }, data: { respondedAt: new Date(), responseAction: optionValue } });
+    return { ok: true };
+  }));
 }

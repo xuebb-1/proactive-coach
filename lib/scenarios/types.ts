@@ -21,7 +21,7 @@ export interface ScenarioPlugin {
   buildEveningGoal(params: {
     dateKey: string;
     eveningPlanId: string;
-    morningOutcome: "COMPLETED" | "SKIPPED" | "AUTO_ACCEPTED" | "OTHER";
+    morningOutcome: "COMPLETED" | "SKIPPED" | "NO_RESPONSE" | "OTHER";
   }): string;
   buildSwapGoal(params: {
     dateKey: string;

@@ -3,7 +3,7 @@
  * lets the tool layer enforce guardrails the prompt alone can't guarantee:
  * `list_candidate_meals` records which keys it handed out, and
  * `create_daily_plan` / `update_daily_plan` refuse any `mealKey` that isn't
- * in that set (or in the static recipe library as a last-resort check).
+ * in that set and revalidate the meal's availability and owner before writing.
  */
 export type ToolCtx = {
   userId: string;
@@ -13,6 +13,10 @@ export type ToolCtx = {
   dayEndsAt?: Date;
   /** Stable key used by cron-triggered final messages for DB-level idempotency. */
   messageDedupeKey?: string;
+  /** The runner sets this; business clarification questions leave it unset. */
+  trigger?: "morning" | "lunch" | "evening" | "swap";
+  /** The old meal is excluded even when the model forgets excludeMealKeys. */
+  swapMealKey?: string;
   /** Populated by list_candidate_meals; checked by create/update_daily_plan. */
   lastCandidateKeys: Set<string>;
   /** Set once a message/plan is produced, so the runner knows the turn's outcome. */

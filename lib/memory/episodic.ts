@@ -1,37 +1,23 @@
 import { prisma } from "@/lib/db";
+import { currentEventKey, writeTransaction } from "@/lib/operations";
 import type { EpisodicEventType, PlanType } from "@/app/generated/prisma/client";
 
-type LogOpts = {
-  userId: string;
-  eventType: EpisodicEventType;
-  planType?: PlanType;
-  mealKey?: string;
-  metadata?: Record<string, unknown>;
-};
+type LogOpts = { userId: string; eventType: EpisodicEventType; planType?: PlanType; mealKey?: string; metadata?: Record<string, unknown> };
 
-/**
- * Tier 3 memory: append-only raw event log. Never mutate or delete rows here --
- * PreferenceMemory (Tier 2) is derived from this log, and the log itself is
- * what lets a decayed preference be "revived" later if the pattern repeats.
- */
+/** Append-only events; an operation retry must not create a second piece of evidence. */
 export async function logEvent(opts: LogOpts) {
-  return prisma.episodicLog.create({
-    data: {
-      userId: opts.userId,
-      eventType: opts.eventType,
-      planType: opts.planType,
-      mealKey: opts.mealKey,
-      metadata: opts.metadata ? JSON.stringify(opts.metadata) : undefined,
-    },
+  const operation = currentEventKey();
+  const eventKey = operation ? `${operation}:event:${opts.eventType}:${opts.mealKey ?? ""}` : undefined;
+  return writeTransaction(async (db) => {
+    const data = { ...opts, eventKey, metadata: opts.metadata ? JSON.stringify(opts.metadata) : undefined };
+    if (eventKey) return db.episodicLog.upsert({ where: { eventKey }, create: data, update: {} });
+    return db.episodicLog.create({ data });
   });
 }
 
-/** Read access for the Agent's `get_recent_episodes` tool. */
 export async function getRecentEpisodes(userId: string, days = 7, limit = 20) {
-  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
   return prisma.episodicLog.findMany({
-    where: { userId, createdAt: { gte: since } },
-    orderBy: { createdAt: "desc" },
-    take: limit,
+    where: { userId, createdAt: { gte: new Date(Date.now() - days * 86400000) } },
+    orderBy: { createdAt: "desc" }, take: limit,
   });
 }

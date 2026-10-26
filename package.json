@@ -4,12 +4,13 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "prisma generate && prisma migrate deploy && next build",
-    "build:app": "prisma generate && next build",
+    "build": "node scripts/vercel-build.mjs",
+    "build:app": "node scripts/vercel-build.mjs",
+    "vercel-build": "node scripts/vercel-build.mjs",
     "start": "next start",
     "lint": "eslint",
-    "test": "vitest run",
-    "test:ci": "vitest run --reporter=verbose",
+    "test": "prisma generate && node scripts/test.mjs",
+    "test:ci": "prisma generate && node scripts/test.mjs --reporter=verbose",
     "test:e2e": "playwright test",
     "dev:inngest": "npx inngest-cli@latest dev",
     "postinstall": "prisma generate",
@@ -35,6 +36,8 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "0.4.3",
+    "@electric-sql/pglite-socket": "0.1.3",
     "@playwright/test": "^1.62.1",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",

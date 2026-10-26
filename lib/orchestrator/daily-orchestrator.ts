@@ -5,13 +5,11 @@ import { logEvent } from "@/lib/memory/episodic";
 import { getEngagementTrend } from "./engagement";
 import { runAgentTurn } from "@/lib/agent/runner";
 import { getScenario } from "@/lib/scenarios/registry";
+import { withUserOperation, writeTransaction } from "@/lib/operations";
 import type { PersonaProfile, UserProfile } from "@/app/generated/prisma/client";
 
-type FullUser = {
-  id: string;
-  profile: UserProfile;
-  persona: PersonaProfile;
-};
+type FullUser = { id: string; profile: UserProfile; persona: PersonaProfile };
+type Trigger = "morning" | "lunch" | "evening";
 
 export type OrchestratorExecution = {
   now?: Date;
@@ -21,160 +19,109 @@ export type OrchestratorExecution = {
 
 function executionFor(user: FullUser, execution?: OrchestratorExecution) {
   const now = execution?.now ?? new Date();
-  const timezone = user.profile.timezone;
   return {
-    dateKey: execution?.dateKey ?? todayKeyForTimeZone(timezone, now),
-    dayEndsAt: execution?.dayEndsAt ?? endOfDayForTimeZone(timezone, now),
+    now,
+    dateKey: execution?.dateKey ?? todayKeyForTimeZone(user.profile.timezone, now),
+    dayEndsAt: execution?.dayEndsAt ?? endOfDayForTimeZone(user.profile.timezone, now),
   };
 }
 
-function dedupeKey(userId: string, dateKey: string, trigger: "morning" | "lunch" | "evening") {
+function dedupeKey(userId: string, dateKey: string, trigger: Trigger) {
   return `agent-daily:${userId}:${dateKey}:${trigger}`;
 }
 
-function explicitDislikesOf(user: FullUser): string[] {
-  return JSON.parse(user.profile.dislikedFoods || "[]");
+const dislikes = (user: FullUser): string[] => JSON.parse(user.profile.dislikedFoods || "[]");
+
+/** New deliveries use a slot key; retain recognition of pre-migration Beta keys. */
+async function delivered(userId: string, dateKey: string, trigger: Trigger) {
+  return prisma.message.findFirst({
+    where: {
+      userId,
+      OR: [
+        { deliveryKey: `${userId}:${dateKey}:${trigger.toUpperCase()}` },
+        { dedupeKey: dedupeKey(userId, dateKey, trigger) },
+      ],
+    },
+  });
 }
 
-/**
- * 07:30 trigger: an Agent turn plans today's lunch and sends the
- * confirm/swap message. Idempotency is keyed on the MORNING *message*, not
- * the plan -- if create_daily_plan succeeded but the model then failed
- * before send_proactive_message, the plan already existing must NOT
- * permanently silence today (see plan §护栏与失败处理).
- */
 export async function runMorning(user: FullUser, execution?: OrchestratorExecution) {
-  const { dateKey, dayEndsAt } = executionFor(user, execution);
-  await decayStalePreferences(user.id);
-
-  const plan = await prisma.dailyPlan.findUnique({
-    where: { userId_date_type: { userId: user.id, date: dateKey, type: "MORNING" } },
+  const { now, dateKey, dayEndsAt } = executionFor(user, execution);
+  return withUserOperation(user.id, `cron:${user.id}:${dateKey}:morning`, async () => {
+    const existing = await delivered(user.id, dateKey, "morning");
+    if (existing) return { skipped: true, reason: "already_generated", planId: existing.planId, messageId: existing.id };
+    await decayStalePreferences(user.id, now);
+    const plan = await prisma.dailyPlan.findUnique({
+      where: { userId_date_type: { userId: user.id, date: dateKey, type: "MORNING" } },
+    });
+    const trend = await getEngagementTrend(user.id, { timezone: user.profile.timezone, now });
+    const scenario = getScenario(user.profile.scenarioId);
+    return { skipped: false, ...await runAgentTurn({
+      userId: user.id, trigger: "morning", goal: scenario.buildMorningGoal({ trend, dateKey }), dateKey,
+      explicitDislikedFoods: dislikes(user), fallbackPlanId: plan?.id, dayEndsAt,
+      dedupeKey: dedupeKey(user.id, dateKey, "morning"), scenarioId: scenario.id,
+    }) };
   });
-  const existingMessage = plan
-    ? await prisma.message.findFirst({ where: { planId: plan.id, type: "MORNING" } })
-    : null;
-  if (existingMessage) {
-    return { skipped: true, reason: "already_generated", planId: plan!.id, messageId: existingMessage.id };
-  }
-
-  const trend = await getEngagementTrend(user.id);
-  const scenario = getScenario(user.profile.scenarioId);
-  const goal = scenario.buildMorningGoal({ trend, dateKey });
-
-  const result = await runAgentTurn({
-    userId: user.id,
-    trigger: "morning",
-    goal,
-    dateKey,
-    explicitDislikedFoods: explicitDislikesOf(user),
-    fallbackPlanId: plan?.id,
-    dayEndsAt,
-    dedupeKey: dedupeKey(user.id, dateKey, "morning"),
-    scenarioId: scenario.id,
-  });
-
-  return { skipped: false, ...result };
 }
 
-/** 12:00 trigger: nudge about the meal plan. Falls back to generating one if morning was missed. */
 export async function runLunch(user: FullUser, execution?: OrchestratorExecution) {
-  const { dateKey, dayEndsAt } = executionFor(user, execution);
-
-  let plan = await prisma.dailyPlan.findUnique({
-    where: { userId_date_type: { userId: user.id, date: dateKey, type: "MORNING" } },
-  });
-  if (!plan) {
-    const morningResult = await runMorning(user, { ...execution, dateKey, dayEndsAt });
-    if (morningResult.planId) {
-      plan = await prisma.dailyPlan.findUnique({ where: { id: morningResult.planId } });
+  const resolved = executionFor(user, execution);
+  const { dateKey, dayEndsAt } = resolved;
+  return withUserOperation(user.id, `cron:${user.id}:${dateKey}:lunch`, async () => {
+    const existing = await delivered(user.id, dateKey, "lunch");
+    if (existing) return { skipped: true, reason: "already_sent", planId: existing.planId, messageId: existing.id };
+    let plan = await prisma.dailyPlan.findUnique({
+      where: { userId_date_type: { userId: user.id, date: dateKey, type: "MORNING" } },
+    });
+    if (!plan) {
+      // Missing-morning recovery keeps the queued user's original local day.
+      const morning = await runMorning(user, resolved);
+      if ("status" in morning && morning.status === "failed" && !morning.finalMessageId) return morning;
+      plan = await prisma.dailyPlan.findUnique({
+        where: { userId_date_type: { userId: user.id, date: dateKey, type: "MORNING" } },
+      });
     }
-  }
-  if (!plan) return { skipped: true, reason: "no_plan" as const };
-
-  const existingLunchMsg = await prisma.message.findFirst({
-    where: { userId: user.id, planId: plan.id, type: "LUNCH" },
+    if (!plan) return { skipped: true, reason: "no_eligible_plan" };
+    const scenario = getScenario(user.profile.scenarioId);
+    return { skipped: false, ...await runAgentTurn({
+      userId: user.id, trigger: "lunch", dateKey, explicitDislikedFoods: dislikes(user), fallbackPlanId: plan.id,
+      dayEndsAt, dedupeKey: dedupeKey(user.id, dateKey, "lunch"), scenarioId: scenario.id,
+      goal: scenario.buildLunchGoal({
+        dateKey, morningPlanId: plan.id, morningMealTitle: plan.mealTitle ?? "（未定）",
+        morningStatus: plan.status, alreadyDecided: plan.status !== "PENDING",
+      }),
+    }) };
   });
-  if (existingLunchMsg) return { skipped: true, reason: "already_sent" as const, planId: plan.id, messageId: existingLunchMsg.id };
-
-  const alreadyDecided = plan.status === "CONFIRMED" || plan.status === "SWAPPED";
-  const scenario = getScenario(user.profile.scenarioId);
-  const goal = scenario.buildLunchGoal({
-    dateKey,
-    morningPlanId: plan.id,
-    morningMealTitle: plan.mealTitle ?? "（未定）",
-    morningStatus: plan.status,
-    alreadyDecided,
-  });
-
-  const result = await runAgentTurn({
-    userId: user.id,
-    trigger: "lunch",
-    goal,
-    dateKey,
-    explicitDislikedFoods: explicitDislikesOf(user),
-    fallbackPlanId: plan.id,
-    dayEndsAt,
-    dedupeKey: dedupeKey(user.id, dateKey, "lunch"),
-    scenarioId: scenario.id,
-  });
-
-  return { skipped: false, ...result };
 }
 
-/** 20:30 trigger: auto-resolve unanswered plans, then ask for a weight check-in. */
 export async function runEvening(user: FullUser, execution?: OrchestratorExecution) {
   const { dateKey, dayEndsAt } = executionFor(user, execution);
-
-  const morningPlan = await prisma.dailyPlan.findUnique({
-    where: { userId_date_type: { userId: user.id, date: dateKey, type: "MORNING" } },
-  });
-
-  let outcome: "COMPLETED" | "SKIPPED" | "AUTO_ACCEPTED" | "OTHER" = "OTHER";
-  if (morningPlan) {
-    if (morningPlan.status === "PENDING" || morningPlan.status === "CONFIRMED" || morningPlan.status === "SWAPPED") {
-      // Not explicitly completed/skipped by the user -- the day is ending,
-      // so resolve it deterministically rather than leaving it dangling.
-      // This is a fixed business rule, not a judgment call -- no Agent turn needed here.
-      if (morningPlan.status === "PENDING") {
-        await logEvent({ userId: user.id, eventType: "AUTO_ACCEPTED", planType: "MORNING", mealKey: morningPlan.mealKey ?? undefined });
+  return withUserOperation(user.id, `cron:${user.id}:${dateKey}:evening`, async () => {
+    const existing = await delivered(user.id, dateKey, "evening");
+    if (existing) return { skipped: true, reason: "already_sent", messageId: existing.id };
+    const { plan, outcome } = await writeTransaction(async (db) => {
+      const morning = await db.dailyPlan.findUnique({
+        where: { userId_date_type: { userId: user.id, date: dateKey, type: "MORNING" } },
+      });
+      let outcome: "COMPLETED" | "SKIPPED" | "NO_RESPONSE" | "OTHER" = "OTHER";
+      if (morning) {
+        if (["PENDING", "CONFIRMED", "SWAPPED", "AUTO_ACCEPTED", "NO_RESPONSE"].includes(morning.status)) {
+          outcome = "NO_RESPONSE";
+          await db.dailyPlan.update({ where: { id: morning.id }, data: { status: "NO_RESPONSE" } });
+          await logEvent({ userId: user.id, eventType: "PLAN_NO_RESPONSE", planType: "MORNING", mealKey: morning.mealKey ?? undefined });
+        } else if (morning.status === "COMPLETED" || morning.status === "SKIPPED") outcome = morning.status;
       }
-      await prisma.dailyPlan.update({ where: { id: morningPlan.id }, data: { status: "AUTO_ACCEPTED" } });
-      outcome = "AUTO_ACCEPTED";
-    } else if (morningPlan.status === "COMPLETED") {
-      outcome = "COMPLETED";
-    } else if (morningPlan.status === "SKIPPED") {
-      outcome = "SKIPPED";
-    }
-  }
-
-  // Idempotent on the EVENING *message*, not the plan -- same reasoning as runMorning.
-  const existingEveningMessage = await prisma.message.findFirst({
-    where: { userId: user.id, type: "EVENING", plan: { date: dateKey, type: "EVENING" } },
+      const plan = await db.dailyPlan.upsert({
+        where: { userId_date_type: { userId: user.id, date: dateKey, type: "EVENING" } },
+        create: { userId: user.id, date: dateKey, type: "EVENING", status: "PENDING", expiresAt: dayEndsAt }, update: {},
+      });
+      return { plan, outcome };
+    });
+    const scenario = getScenario(user.profile.scenarioId);
+    return { skipped: false, ...await runAgentTurn({
+      userId: user.id, trigger: "evening", dateKey, explicitDislikedFoods: dislikes(user), fallbackPlanId: plan.id,
+      dayEndsAt, dedupeKey: dedupeKey(user.id, dateKey, "evening"), scenarioId: scenario.id,
+      goal: scenario.buildEveningGoal({ dateKey, eveningPlanId: plan.id, morningOutcome: outcome }),
+    }) };
   });
-  if (existingEveningMessage) {
-    return { skipped: true, reason: "already_sent" as const, messageId: existingEveningMessage.id };
-  }
-
-  const eveningPlan = await prisma.dailyPlan.upsert({
-    where: { userId_date_type: { userId: user.id, date: dateKey, type: "EVENING" } },
-    create: { userId: user.id, date: dateKey, type: "EVENING", status: "PENDING", expiresAt: dayEndsAt },
-    update: {},
-  });
-
-  const scenario = getScenario(user.profile.scenarioId);
-  const goal = scenario.buildEveningGoal({ dateKey, eveningPlanId: eveningPlan.id, morningOutcome: outcome });
-
-  const result = await runAgentTurn({
-    userId: user.id,
-    trigger: "evening",
-    goal,
-    dateKey,
-    explicitDislikedFoods: explicitDislikesOf(user),
-    fallbackPlanId: eveningPlan.id,
-    dayEndsAt,
-    dedupeKey: dedupeKey(user.id, dateKey, "evening"),
-    scenarioId: scenario.id,
-  });
-
-  return { skipped: false, ...result };
 }

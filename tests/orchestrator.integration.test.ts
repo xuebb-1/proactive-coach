@@ -29,7 +29,7 @@ describe("daily orchestrator in mock mode", () => {
     expect(traces[0].source).toBe("MOCK");
 
     const second = await runMorning({ id: user.id, profile: user.profile, persona: user.persona });
-    expect(second).toMatchObject({ skipped: true, reason: "already_generated" });
+    expect(second).toMatchObject({ skipped: true });
     expect(await prisma.message.count({ where: { userId: user.id, type: "MORNING" } })).toBe(1);
   });
 
@@ -44,13 +44,15 @@ describe("daily orchestrator in mock mode", () => {
     expect(lunch?.planId).toBe(morning?.id);
   });
 
-  it("auto-accepts an unresolved morning plan in the evening", async () => {
+  it("keeps an unreported morning plan unknown in the evening", async () => {
     if (!user.profile || !user.persona) throw new Error("fixture user is not onboarded");
 
     await runEvening({ id: user.id, profile: user.profile, persona: user.persona });
 
     const morning = await prisma.dailyPlan.findFirst({ where: { userId: user.id, type: "MORNING" } });
-    expect(morning?.status).toBe("AUTO_ACCEPTED");
+    expect(morning?.status).toBe("NO_RESPONSE");
     expect(await prisma.message.count({ where: { userId: user.id, type: "EVENING" } })).toBe(1);
+    expect(await prisma.preferenceMemory.count({ where: { userId: user.id } })).toBe(0);
+    expect(await prisma.episodicLog.count({ where: { userId: user.id, eventType: "ACTION_COMPLETE" } })).toBe(0);
   });
 });

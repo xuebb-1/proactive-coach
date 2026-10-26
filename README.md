@@ -49,6 +49,8 @@
 
 ## 本地开发
 
+需要 Node.js 24。`npm test` 会自动创建临时数据库、执行全部迁移并在结束后销毁，不读取本地业务数据库。可靠性 Preview 的真实模型与多连接数据库验收见[验收记录](docs/reliability-preview-acceptance.md)。
+
 数据库是 Postgres。先把 `.env.example` 复制为 `.env`，配置数据库和 Clerk；不配置 Clerk 时仅在非生产环境保留旧的单用户开发兼容模式。
 
 ```bash

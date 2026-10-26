@@ -7,6 +7,16 @@
 3. Deploy the additive migration, then deploy the application.
 4. Keep `ASYNC_AGENT_ENABLED=false` and `ASYNC_AGENT_SHADOW=true`.
 
+## Reliability integration
+
+The reliability source preview passed its [isolated online acceptance](reliability-preview-acceptance.md). Beta uses its own additive `20261026000100_reliability_beta` migration after `20260828140500_beta_multi_user`; do not apply the single-user reliability migration on this path or edit applied migration history.
+
+Configure `PREVIEW_DATABASE_URL` and `PREVIEW_DIRECT_DATABASE_URL` for a separate Beta test database before deploying a Beta Preview. The single-user reliability Preview database has a different migration history and must not be reused for Beta. Preview builds and the Prisma CLI refuse to fall back to production connection variables.
+
+Use Node.js 24. `npm test` / `npm run test:ci` automatically create and destroy a fresh loopback-only database, apply all Beta migrations and use mock model calls. The real model smoke workflow remains a manual opt-in against its disposable CI PostgreSQL service.
+
+One database lease serializes each user's Web, recovery-Cron and Inngest operations. Different users remain independent. Model calls run outside long database transactions; each write checks the current lease token. A failed turn with no final delivery throws so Inngest retries; a delivered fallback is recorded as INCOMPLETE. A plan with no response remains NO_RESPONSE rather than being counted as completed.
+
 ## Staged rollout
 
 1. Enable Inngest scheduling in staging for one mock user and confirm event IDs, local dates and message deduplication.

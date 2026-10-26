@@ -4,22 +4,28 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { prisma } from "@/lib/db";
 import { getOrCreateCurrentUser, requireCurrentUser } from "@/lib/user";
+import { publicAction } from "@/lib/action-result";
+import { UserInputError } from "@/lib/user-error";
 import { respondToMessage, respondToAskUser, submitCheckin, type ButtonAction } from "@/lib/orchestrator/actions";
 
 export async function respondToMessageAction(formData: FormData) {
   const user = await requireCurrentUser();
   const messageId = String(formData.get("messageId"));
   const action = String(formData.get("action")) as ButtonAction;
-  await respondToMessage(user.id, messageId, action);
-  revalidatePath("/");
+  return publicAction(async () => {
+    await respondToMessage(user.id, messageId, action);
+    revalidatePath("/");
+  });
 }
 
 export async function respondToAskUserAction(formData: FormData) {
   const user = await requireCurrentUser();
   const messageId = String(formData.get("messageId"));
   const optionValue = String(formData.get("optionValue"));
-  await respondToAskUser(user.id, messageId, optionValue);
-  revalidatePath("/");
+  return publicAction(async () => {
+    await respondToAskUser(user.id, messageId, optionValue);
+    revalidatePath("/");
+  });
 }
 
 export async function submitCheckinAction(formData: FormData) {
@@ -27,11 +33,11 @@ export async function submitCheckinAction(formData: FormData) {
   const weightKg = Number(formData.get("weightKg"));
   const difficultyRaw = formData.get("difficulty");
   const difficulty = difficultyRaw ? Number(difficultyRaw) : undefined;
-  if (!Number.isFinite(weightKg) || weightKg <= 0) {
-    throw new Error("请输入有效体重");
-  }
-  await submitCheckin(user.id, weightKg, difficulty);
-  revalidatePath("/");
+  return publicAction(async () => {
+    if (!Number.isFinite(weightKg) || weightKg <= 0) throw new UserInputError("请输入有效体重");
+    await submitCheckin(user.id, weightKg, difficulty);
+    revalidatePath("/");
+  });
 }
 
 export async function createOnboardingAction(formData: FormData) {

@@ -1,5 +1,5 @@
 // Prisma schema for proactive-coach MVP.
-// Single-user personal project: only one User row is expected to exist in v1.
+// Each user's plans, messages and memory are scoped by userId.
 
 generator client {
   provider = "prisma-client"
@@ -91,6 +91,7 @@ enum PlanStatus {
   COMPLETED
   SKIPPED
   AUTO_ACCEPTED
+  NO_RESPONSE
   EXPIRED
 }
 
@@ -136,6 +137,7 @@ model Message {
   respondedAt    DateTime?
   responseAction String? // "confirm" | "swap" | "complete" | "skip"
   dedupeKey      String?        @unique
+  deliveryKey    String?        @unique
   createdAt      DateTime       @default(now())
 }
 
@@ -150,6 +152,7 @@ enum EpisodicEventType {
   CHECKIN
   AUTO_ACCEPTED
   ASK_USER_RESPONDED
+  PLAN_NO_RESPONSE
 }
 
 model EpisodicLog {
@@ -160,6 +163,7 @@ model EpisodicLog {
   planType  PlanType?
   mealKey   String?
   metadata  String? // JSON string, freeform extra context
+  eventKey  String?           @unique
   createdAt DateTime          @default(now())
 }
 
@@ -187,10 +191,22 @@ model PreferenceMemory {
   source          String // "button_action" | "free_text_llm" | "onboarding"
   evidenceCount   Int      @default(1)
   lastConfirmedAt DateTime @default(now())
+  lastDecayedAt   DateTime?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
   @@unique([userId, key])
+}
+
+model OperationLease {
+  key       String   @id
+  token     String
+  expiresAt DateTime
+}
+
+model PreferenceEvidence {
+  key       String   @id
+  createdAt DateTime @default(now())
 }
 
 enum AgentTraceSource {

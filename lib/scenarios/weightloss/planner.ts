@@ -1,127 +1,46 @@
+import { UserInputError } from "@/lib/user-error";
 import { prisma } from "@/lib/db";
 import { getActiveDislikedMealKeys } from "@/lib/memory/preference";
 import { getMealLibrary, type Recipe } from "./meals";
 
-const RECENT_REPEAT_WINDOW_DAYS = 3;
-
-/** The candidate pool depends on how the user actually eats (cook/canteen/takeout). */
-async function getLibraryForUser(userId: string): Promise<Recipe[]> {
-  const profile = await prisma.userProfile.findUnique({
-    where: { userId },
-    select: { eatingMode: true },
-  });
-  return getMealLibrary(userId, profile?.eatingMode ?? "canteen");
+export class NoCandidateMealsError extends UserInputError {
+  constructor() { super("目前没有符合忌口的可用方案，请在菜品库补充或启用其他方案。"); }
 }
 
-function hashToIndex(seed: string, mod: number): number {
+function matchesExplicitDislike(recipe: Recipe, dislikedFoods: string[]) {
+  const text = [recipe.title, ...recipe.tags].join(" ").toLowerCase();
+  return dislikedFoods.some((food) => food.trim() && text.includes(food.trim().toLowerCase()));
+}
+
+/** Only recent repeats may be relaxed. Never relax food exclusions or the meal being swapped away. */
+export async function getCandidateMeals(userId: string, explicitDislikedFoods: string[], extraExcludeKeys: string[] = []): Promise<Recipe[]> {
+  const profile = await prisma.userProfile.findUnique({ where: { userId }, select: { eatingMode: true } });
+  const [library, disliked, recentPlans] = await Promise.all([
+    getMealLibrary(userId, profile?.eatingMode ?? "canteen"),
+    getActiveDislikedMealKeys(userId),
+    prisma.dailyPlan.findMany({
+      where: { userId, type: "MORNING", createdAt: { gte: new Date(Date.now() - 3 * 86400000) }, mealKey: { not: null } },
+      select: { mealKey: true },
+    }),
+  ]);
+  const excluded = new Set([...disliked, ...extraExcludeKeys]);
+  const eligible = library.filter((meal) => !excluded.has(meal.key) && !matchesExplicitDislike(meal, explicitDislikedFoods));
+  const recent = new Set(recentPlans.map((plan) => plan.mealKey));
+  const fresh = eligible.filter((meal) => !recent.has(meal.key));
+  return fresh.length ? fresh : eligible;
+}
+
+function pick(candidates: Recipe[], seed: string): Recipe {
+  if (!candidates.length) throw new NoCandidateMealsError();
   let hash = 0;
-  for (let i = 0; i < seed.length; i++) {
-    hash = (hash * 31 + seed.charCodeAt(i)) >>> 0;
-  }
-  return hash % mod;
+  for (const char of seed) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  return candidates[hash % candidates.length];
 }
 
-async function getExcludedMealKeys(userId: string): Promise<Set<string>> {
-  const disliked = await getActiveDislikedMealKeys(userId);
-
-  const cutoff = new Date(Date.now() - RECENT_REPEAT_WINDOW_DAYS * 24 * 60 * 60 * 1000);
-  const recentPlans = await prisma.dailyPlan.findMany({
-    where: { userId, type: "MORNING", createdAt: { gte: cutoff }, mealKey: { not: null } },
-    select: { mealKey: true },
-  });
-
-  const excluded = new Set<string>(disliked);
-  for (const p of recentPlans) {
-    if (p.mealKey) excluded.add(p.mealKey);
-  }
-  return excluded;
+export async function pickMealForDate(userId: string, dateKey: string, explicitDislikedFoods: string[]) {
+  return pick(await getCandidateMeals(userId, explicitDislikedFoods), `${userId}:${dateKey}`);
 }
 
-function matchesExplicitDislike(recipe: Recipe, dislikedFoods: string[]): boolean {
-  if (dislikedFoods.length === 0) return false;
-  return recipe.tags.some((tag) =>
-    dislikedFoods.some((d) => d.trim() && tag.includes(d.trim()))
-  );
-}
-
-/**
- * Filtered candidate list for the Agent's `list_candidate_meals` tool -- the
- * model picks from this set, it never invents a meal. Same filtering rules
- * (Tier2 dislikes + explicit onboarding dislikes + recent-repeat window) as
- * the rule-based picker below, just returning the whole set instead of one
- * hashed choice.
- */
-export async function getCandidateMeals(
-  userId: string,
-  explicitDislikedFoods: string[],
-  extraExcludeKeys: string[] = []
-): Promise<Recipe[]> {
-  const library = await getLibraryForUser(userId);
-  const excluded = await getExcludedMealKeys(userId);
-  for (const k of extraExcludeKeys) excluded.add(k);
-
-  let candidates = library.filter(
-    (r) => !excluded.has(r.key) && !matchesExplicitDislike(r, explicitDislikedFoods)
-  );
-  if (candidates.length === 0) {
-    candidates = library.filter((r) => !matchesExplicitDislike(r, explicitDislikedFoods));
-  }
-  if (candidates.length === 0) {
-    candidates = library.filter((r) => !extraExcludeKeys.includes(r.key));
-  }
-  if (candidates.length === 0) {
-    candidates = library;
-  }
-  return candidates;
-}
-
-/**
- * Deterministic pick (hash of date+user, not random) so re-triggering the
- * same day's cron job is idempotent and doesn't change the answer.
- */
-export async function pickMealForDate(
-  userId: string,
-  dateKey: string,
-  explicitDislikedFoods: string[]
-): Promise<Recipe> {
-  const library = await getLibraryForUser(userId);
-  const excluded = await getExcludedMealKeys(userId);
-
-  let candidates = library.filter(
-    (r) => !excluded.has(r.key) && !matchesExplicitDislike(r, explicitDislikedFoods)
-  );
-
-  // Filters can legitimately exhaust the list (small library, many exclusions).
-  // Fall back progressively rather than erroring out.
-  if (candidates.length === 0) {
-    candidates = library.filter((r) => !matchesExplicitDislike(r, explicitDislikedFoods));
-  }
-  if (candidates.length === 0) {
-    candidates = library;
-  }
-
-  const idx = hashToIndex(`${userId}:${dateKey}`, candidates.length);
-  return candidates[idx];
-}
-
-/** Used by the "swap" action: pick a different meal than the current one. */
-export async function pickSwapMeal(
-  userId: string,
-  dateKey: string,
-  currentMealKey: string,
-  explicitDislikedFoods: string[]
-): Promise<Recipe> {
-  const library = await getLibraryForUser(userId);
-  const excluded = await getExcludedMealKeys(userId);
-  excluded.add(currentMealKey);
-
-  let candidates = library.filter(
-    (r) => !excluded.has(r.key) && !matchesExplicitDislike(r, explicitDislikedFoods)
-  );
-  if (candidates.length === 0) {
-    candidates = library.filter((r) => r.key !== currentMealKey);
-  }
-
-  const idx = hashToIndex(`${userId}:${dateKey}:swap:${Date.now()}`, candidates.length);
-  return candidates[idx];
+export async function pickSwapMeal(userId: string, dateKey: string, currentMealKey: string, explicitDislikedFoods: string[]) {
+  return pick(await getCandidateMeals(userId, explicitDislikedFoods, [currentMealKey]), `${userId}:${dateKey}:swap:${currentMealKey}`);
 }

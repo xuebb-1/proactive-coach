@@ -1,8 +1,9 @@
 import { z } from "zod";
 import { tool } from "ai";
 import { prisma } from "@/lib/db";
+import { writeTransaction } from "@/lib/operations";
 import { searchPreferences, recordPreferenceSignal } from "@/lib/memory/preference";
-import { getRecentEpisodes, logEvent } from "@/lib/memory/episodic";
+import { getRecentEpisodes } from "@/lib/memory/episodic";
 import { getEngagementTrend } from "@/lib/orchestrator/engagement";
 import { daysBetween } from "@/lib/date";
 import type { ToolCtx } from "./context";
@@ -65,22 +66,21 @@ export const memoryImpls = {
   },
 
   async recordPreferenceSignal(ctx: ToolCtx, args: { mealKey: string; signal: "dislike" | "like" }) {
-    await recordPreferenceSignal(ctx.userId, args.mealKey, args.signal);
+    if (ctx.trigger !== "swap" || args.signal !== "dislike" || args.mealKey !== ctx.swapMealKey) {
+      throw new Error("本轮只能记录被换掉餐食的一次负反馈。");
+    }
+    if (!ctx.finalPlanId) throw new Error("换菜成功后才能记录负反馈。");
+    await writeTransaction(async (db) => {
+      const plan = await db.dailyPlan.findUnique({
+        where: { id: ctx.finalPlanId, userId: ctx.userId, date: ctx.dateKey },
+      });
+      if (!plan?.mealKey || plan.mealKey === ctx.swapMealKey) throw new Error("换菜成功后才能记录负反馈。");
+      await recordPreferenceSignal(ctx.userId, args.mealKey, args.signal);
+    });
     ctx.recordedPreferenceSignal = true;
     return { ok: true, mealKey: args.mealKey, signal: args.signal };
   },
 
-  async logEpisode(
-    ctx: ToolCtx,
-    args: {
-      eventType: "PLAN_GENERATED" | "ACTION_CONFIRM" | "ACTION_SWAP" | "ACTION_COMPLETE" | "ACTION_SKIP" | "AUTO_ACCEPTED";
-      mealKey?: string;
-      metadata?: Record<string, unknown>;
-    }
-  ) {
-    await logEvent({ userId: ctx.userId, eventType: args.eventType, mealKey: args.mealKey, metadata: args.metadata });
-    return { ok: true };
-  },
 };
 
 export function buildMemoryTools(ctx: ToolCtx) {
@@ -117,29 +117,12 @@ export function buildMemoryTools(ctx: ToolCtx) {
 
   const record_preference_signal = tool({
     description:
-      "记录一次针对某道菜的『喜欢/不喜欢』离散信号，只能传 dislike 或 like，不能传具体置信度数值——置信度的增量由系统代码计算，不接受模型给的浮点数。",
+      "仅在换菜成功后，为被换掉的原餐食记录一次 dislike；置信度和证据去重由代码处理，不能推断其他反馈。",
     inputSchema: z.object({
       mealKey: z.string(),
       signal: z.enum(["dislike", "like"]),
     }),
     execute: async (args) => memoryImpls.recordPreferenceSignal(ctx, args),
-  });
-
-  const log_episode = tool({
-    description: "写入 Tier3 事件日志（追加，不可覆盖）。仅用于记录本轮已发生的、非计划/消息类的辅助事件。",
-    inputSchema: z.object({
-      eventType: z.enum([
-        "PLAN_GENERATED",
-        "ACTION_CONFIRM",
-        "ACTION_SWAP",
-        "ACTION_COMPLETE",
-        "ACTION_SKIP",
-        "AUTO_ACCEPTED",
-      ]),
-      mealKey: z.string().optional(),
-      metadata: z.record(z.string(), z.unknown()).optional(),
-    }),
-    execute: async (args) => memoryImpls.logEpisode(ctx, args),
   });
 
   return {
@@ -148,6 +131,5 @@ export function buildMemoryTools(ctx: ToolCtx) {
     get_recent_episodes,
     get_engagement_trend,
     record_preference_signal,
-    log_episode,
   };
 }
